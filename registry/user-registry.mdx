@@ -1,0 +1,497 @@
+---
+title: "UserRegistry"
+description: "Upgradeable registry implementation for user-deployed subregistries"
+---
+
+## Overview
+
+`UserRegistry` is an upgradeable version of `PermissionedRegistry` designed for user-created subregistries. It implements the UUPS (Universal Upgradeable Proxy Standard) pattern, allowing registry administrators to upgrade the implementation while preserving all registration data.
+
+## Contract Details
+
+**Location**: `contracts/src/registry/UserRegistry.sol`
+
+**Inherits**:
+- `Initializable` - OpenZeppelin proxy initialization
+- `PermissionedRegistry` - Core registry functionality
+- `UUPSUpgradeable` - UUPS upgrade mechanism
+
+**Interface Support**: Extends `PermissionedRegistry` interfaces plus `UUPSUpgradeable`
+
+## Architecture
+
+### Proxy Pattern
+
+UserRegistry uses the UUPS upgrade pattern:
+
+```
+┌─────────────────┐
+│  Proxy Contract │  ← Stores all data
+│   (deployed by  │  ← User calls this address
+│ VerifiableFactory)│
+└────────┬────────┘
+         │ delegatecall
+         ↓
+┌─────────────────┐
+│ Implementation  │  ← UserRegistry logic
+│  (singleton)    │  ← Upgradeable via _authorizeUpgrade
+└─────────────────┘
+```
+
+**Benefits**:
+- Data persists across upgrades
+- Implementation is a singleton (deployed once)
+- Each proxy is cheap to deploy
+- Only authorized accounts can upgrade
+
+## Constructor
+
+```solidity
+constructor(
+    IHCAFactoryBasic hcaFactory_,
+    IRegistryMetadata metadataProvider_
+)
+```
+
+The constructor is only called for the implementation contract, not proxies.
+
+**Parameters**:
+- `hcaFactory_` - Factory for hierarchical contract addresses
+- `metadataProvider_` - Metadata provider for token URIs
+
+**Example Deployment**:
+
+```solidity
+// Deploy implementation once
+UserRegistry implementation = new UserRegistry(
+    hcaFactory,
+    metadataProvider
+);
+
+// Deploy proxies via VerifiableFactory
+address proxyAddress = verifiableFactory.deployProxy(
+    address(implementation),
+    salt,
+    abi.encodeCall(
+        UserRegistry.initialize,
+        (admin, adminRoles)
+    )
+);
+
+UserRegistry registry = UserRegistry(proxyAddress);
+```
+
+<Note>
+  The constructor calls `_disableInitializers()` to prevent the implementation contract from being initialized directly.
+</Note>
+
+## Initialization
+
+### initialize
+
+```solidity
+function initialize(
+    address admin,
+    uint256 roleBitmap
+) public initializer
+```
+
+Initializes a new proxy instance. Called once per proxy during deployment.
+
+**Parameters**:
+- `admin` - Address to receive initial roles (cannot be `address(0)`)
+- `roleBitmap` - Initial roles to grant to admin
+
+**Example**:
+
+```solidity
+// Initialize with full admin control
+registry.initialize(
+    msg.sender,
+    RegistryRolesLib.ROLE_REGISTRAR |
+    RegistryRolesLib.ROLE_REGISTRAR_ADMIN |
+    RegistryRolesLib.ROLE_SET_PARENT |
+    RegistryRolesLib.ROLE_SET_PARENT_ADMIN |
+    RegistryRolesLib.ROLE_UPGRADE |
+    RegistryRolesLib.ROLE_UPGRADE_ADMIN
+);
+```
+
+**Errors**:
+
+```solidity
+error InvalidOwner();  // If admin is address(0)
+```
+
+<Warning>
+  The `initialize` function can only be called once per proxy. Attempting to call it again will revert.
+</Warning>
+
+## Upgrade Mechanism
+
+### _authorizeUpgrade
+
+```solidity
+function _authorizeUpgrade(
+    address newImplementation
+) internal override onlyRootRoles(RegistryRolesLib.ROLE_UPGRADE)
+```
+
+Authorizes an upgrade to a new implementation contract.
+
+**Requires**: `ROLE_UPGRADE` on `ROOT_RESOURCE`
+
+**Parameters**:
+- `newImplementation` - Address of the new implementation contract
+
+**Example Upgrade Flow**:
+
+```solidity
+// 1. Deploy new implementation
+UserRegistryV2 newImplementation = new UserRegistryV2(
+    hcaFactory,
+    metadataProvider
+);
+
+// 2. Upgrade the proxy (must have ROLE_UPGRADE)
+UserRegistry proxy = UserRegistry(proxyAddress);
+proxy.upgradeToAndCall(
+    address(newImplementation),
+    ""  // Optional initialization data for new version
+);
+
+// 3. Proxy now uses new implementation
+// All data (registrations, roles, etc.) preserved
+```
+
+<Info>
+  The upgrade authorization happens automatically through the `onlyRootRoles` modifier. Only accounts with `ROLE_UPGRADE` can successfully upgrade.
+</Info>
+
+## Interface Support
+
+```solidity
+function supportsInterface(bytes4 interfaceId)
+    public view virtual override returns (bool)
+{
+    return
+        interfaceId == type(UUPSUpgradeable).interfaceId ||
+        super.supportsInterface(interfaceId);
+}
+```
+
+## Deployment Patterns
+
+### Via VerifiableFactory
+
+The recommended deployment method:
+
+```solidity
+import {VerifiableFactory} from "@ensdomains/verifiable-factory/VerifiableFactory.sol";
+
+// Deploy with deterministic address
+address proxyAddress = verifiableFactory.deployProxy(
+    implementationAddress,
+    keccak256(abi.encodePacked("unique-salt", msg.sender)),
+    abi.encodeCall(
+        UserRegistry.initialize,
+        (
+            msg.sender,
+            RegistryRolesLib.ROLE_REGISTRAR |
+            RegistryRolesLib.ROLE_REGISTRAR_ADMIN
+        )
+    )
+);
+```
+
+**Benefits**:
+- Deterministic addresses (same salt = same address)
+- Verifiable deployment parameters
+- Efficient proxy deployment
+
+### As Subregistry
+
+Attach to a parent registry:
+
+```solidity
+// Deploy UserRegistry for a subdomain
+UserRegistry subregistry = UserRegistry(
+    verifiableFactory.deployProxy(
+        implementation,
+        salt,
+        abi.encodeCall(
+            UserRegistry.initialize,
+            (subdomainOwner, ownerRoles)
+        )
+    )
+);
+
+// Set parent reference
+subregistry.setParent(parentRegistry, "subdomain");
+
+// Attach to parent
+parentRegistry.setSubregistry(subdomainTokenId, IRegistry(address(subregistry)));
+
+// Grant roles to subdomain owner
+parentRegistry.grantRoles(
+    subdomainTokenId,
+    RegistryRolesLib.ROLE_SET_SUBREGISTRY,
+    subdomainOwner
+);
+```
+
+## Usage Examples
+
+### Creating a DAO Registry
+
+```solidity
+// Deploy registry for dao.eth
+UserRegistry daoRegistry = UserRegistry(
+    verifiableFactory.deployProxy(
+        implementation,
+        keccak256(abi.encodePacked("dao.eth", block.timestamp)),
+        abi.encodeCall(
+            UserRegistry.initialize,
+            (
+                daoGovernance,
+                RegistryRolesLib.ROLE_REGISTRAR |
+                RegistryRolesLib.ROLE_REGISTRAR_ADMIN |
+                RegistryRolesLib.ROLE_UPGRADE |
+                RegistryRolesLib.ROLE_UPGRADE_ADMIN
+            )
+        )
+    )
+);
+
+// Set as subregistry of dao.eth
+ethRegistry.setSubregistry(daoTokenId, IRegistry(address(daoRegistry)));
+
+// DAO can now manage its subdomains
+// governance.dao.eth, treasury.dao.eth, etc.
+```
+
+### Multi-Sig Controlled Registry
+
+```solidity
+// Deploy with multi-sig as admin
+UserRegistry registry = UserRegistry(
+    verifiableFactory.deployProxy(
+        implementation,
+        salt,
+        abi.encodeCall(
+            UserRegistry.initialize,
+            (
+                multiSigAddress,
+                RegistryRolesLib.ROLE_REGISTRAR |
+                RegistryRolesLib.ROLE_REGISTRAR_ADMIN |
+                RegistryRolesLib.ROLE_UPGRADE
+            )
+        )
+    )
+);
+
+// Multi-sig can delegate specific roles
+registry.grantRoles(
+    ROOT_RESOURCE,
+    RegistryRolesLib.ROLE_REGISTRAR,
+    controller  // Controller can register but not upgrade
+);
+```
+
+### Project Registry with Multiple Admins
+
+```solidity
+// Initialize with primary admin
+registry.initialize(
+    projectLead,
+    RegistryRolesLib.ROLE_REGISTRAR |
+    RegistryRolesLib.ROLE_REGISTRAR_ADMIN
+);
+
+// Grant registrar rights to team members
+registry.grantRoles(
+    ROOT_RESOURCE,
+    RegistryRolesLib.ROLE_REGISTRAR,
+    teamMember1
+);
+
+registry.grantRoles(
+    ROOT_RESOURCE,
+    RegistryRolesLib.ROLE_REGISTRAR,
+    teamMember2
+);
+
+// Separate upgrade authority
+registry.grantRoles(
+    ROOT_RESOURCE,
+    RegistryRolesLib.ROLE_UPGRADE,
+    upgradeController
+);
+```
+
+## Upgrade Scenarios
+
+### Adding New Functionality
+
+```solidity
+// UserRegistryV2 adds new features
+contract UserRegistryV2 is UserRegistry {
+    // New storage (must be appended)
+    uint256 public newFeatureData;
+    
+    function newFeature() public {
+        // New functionality
+    }
+}
+
+// Deploy new implementation
+UserRegistryV2 newImpl = new UserRegistryV2(hcaFactory, metadata);
+
+// Upgrade existing proxy
+registry.upgradeToAndCall(address(newImpl), "");
+
+// Existing data preserved, new features available
+UserRegistryV2(address(registry)).newFeature();
+```
+
+<Warning>
+  **Storage Layout**: New versions must not modify existing storage variables. Only append new storage variables to maintain compatibility.
+</Warning>
+
+### Emergency Upgrade
+
+```solidity
+// Critical bug fix needed
+UserRegistry fixedImplementation = new UserRegistry(
+    hcaFactory,
+    metadata
+);
+
+// Admin with ROLE_UPGRADE can immediately upgrade
+registry.upgradeToAndCall(address(fixedImplementation), "");
+
+// All proxies need individual upgrade calls
+```
+
+## Security Considerations
+
+### Upgrade Authorization
+
+<Warning>
+  Only grant `ROLE_UPGRADE` to trusted accounts. This role allows complete replacement of registry logic.
+</Warning>
+
+```solidity
+// Separate upgrade control from other admin roles
+registry.initialize(
+    admin,
+    RegistryRolesLib.ROLE_REGISTRAR_ADMIN
+    // Deliberately omit ROLE_UPGRADE
+);
+
+// Grant upgrade rights to separate secure account
+registry.grantRoles(
+    ROOT_RESOURCE,
+    RegistryRolesLib.ROLE_UPGRADE,
+    upgradeController
+);
+```
+
+### Initialization Protection
+
+<Info>
+  The implementation contract is protected from initialization via `_disableInitializers()` in the constructor.
+</Info>
+
+### Storage Safety
+
+<Warning>
+  When upgrading, ensure the new implementation maintains the same storage layout for inherited contracts:
+  - `Initializable`
+  - `PermissionedRegistry`
+  - `UUPSUpgradeable`
+  
+  Only add new storage variables at the end.
+</Warning>
+
+## Comparison: UserRegistry vs PermissionedRegistry
+
+<Tabs>
+  <Tab title="UserRegistry">
+    **Use when**:
+    - Users deploy their own subregistries
+    - Upgrade capability is desired
+    - Future features may be needed
+    - Gas cost of deployment is important
+    
+    **Characteristics**:
+    - Deployed via proxy (cheaper)
+    - Upgradeable by ROLE_UPGRADE holders
+    - Requires VerifiableFactory
+    - Slightly higher gas per call (delegatecall overhead)
+  </Tab>
+  
+  <Tab title="PermissionedRegistry">
+    **Use when**:
+    - Core infrastructure registries
+    - Immutability is required
+    - No future upgrades expected
+    - Direct deployment preferred
+    
+    **Characteristics**:
+    - Deployed directly (higher initial cost)
+    - Immutable (no upgrades)
+    - No proxy overhead
+    - Slightly lower gas per call
+  </Tab>
+</Tabs>
+
+## Factory Integration
+
+UserRegistry integrates with ENS v2's factory system:
+
+```solidity
+// Predict address before deployment
+address predictedAddress = verifiableFactory.predictProxyAddress(
+    implementationAddress,
+    salt
+);
+
+// Deploy to predicted address
+address actualAddress = verifiableFactory.deployProxy(
+    implementationAddress,
+    salt,
+    initData
+);
+
+assert(predictedAddress == actualAddress);
+```
+
+## Events
+
+UserRegistry inherits all PermissionedRegistry events and adds UUPS events:
+
+```solidity
+// From UUPSUpgradeable
+event Upgraded(address indexed implementation);
+
+// From Initializable
+event Initialized(uint64 version);
+```
+
+## Related Documentation
+
+<CardGroup cols={2}>
+  <Card title="PermissionedRegistry" icon="shield" href="/registry/permissioned-registry">
+    Base registry implementation and features
+  </Card>
+  <Card title="WrapperRegistry" icon="box" href="/registry/wrapper-registry">
+    Migration-enabled upgradeable registry
+  </Card>
+  <Card title="Verifiable Factory" icon="industry" href="/development/deployment">
+    Deployment patterns and factory usage
+  </Card>
+  <Card title="UUPS Upgrades" icon="arrow-up" href="https://docs.openzeppelin.com/contracts/4.x/api/proxy#UUPSUpgradeable">
+    OpenZeppelin UUPS documentation
+  </Card>
+</CardGroup>

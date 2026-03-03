@@ -1,0 +1,528 @@
+---
+title: Local Devnet
+description: Run a local ENS v2 development network
+---
+
+## Overview
+
+The ENS v2 devnet is a local Ethereum development network pre-configured with all ENS v2 contracts deployed. It's perfect for:
+
+- Testing contract integrations
+- Developing dApps against ENS v2
+- Running end-to-end tests
+- Experimenting with ENS v2 features
+
+## Quick Start
+
+### Native Local Devnet (Recommended)
+
+Start the devnet using the built-in script:
+
+```bash
+cd contracts
+bun run devnet
+```
+
+The devnet will:
+
+1. Compile all contracts
+2. Start Anvil on `http://localhost:8545`
+3. Deploy all ENS v2 contracts
+4. Deploy ENS v1 contracts (for migration testing)
+5. Set up test names and resolvers
+6. Start a health check endpoint on port 8000
+
+<Note>
+  Chain ID: `31337` (default Anvil chain ID)
+</Note>
+
+### Using Docker Compose
+
+For a containerized devnet:
+
+<Steps>
+  <Step title="Ensure Docker is installed">
+    Download from [docker.com](https://www.docker.com/)
+  </Step>
+
+  <Step title="Start the devnet">
+    <CodeGroup>
+    ```bash Using local build
+    docker compose up -d
+    ```
+    
+    ```bash Using pre-built image
+    docker pull ghcr.io/ensdomains/contracts-v2:latest
+    docker compose up -d
+    ```
+    </CodeGroup>
+  </Step>
+
+  <Step title="Verify it's running">
+    ```bash
+    docker logs -f contracts-v2-devnet-1
+    ```
+  </Step>
+
+  <Step title="Stop the devnet">
+    ```bash
+    docker compose down
+    ```
+  </Step>
+</Steps>
+
+## Devnet Configuration
+
+### Network Details
+
+| Property | Value |
+|----------|-------|
+| RPC URL | `http://localhost:8545` |
+| WebSocket URL | `ws://localhost:8545` |
+| Chain ID | `31337` (`0xeeeeed` for custom deployments) |
+| Native Currency | ETH |
+| Block Time | Instant (on transaction) |
+| Health Check | `http://localhost:8000` |
+
+### Pre-funded Accounts
+
+The devnet includes several pre-funded accounts derived from the test mnemonic:
+
+```
+test test test test test test test test test test test junk
+```
+
+| Name | Address | Purpose |
+|------|---------|----------|
+| deployer | `0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266` | Contract deployer |
+| owner | `0x70997970C51812dc3A010C7d01b50e0d17dc79C8` | Owner of registry roots |
+| bridger | `0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC` | Cross-chain bridge account |
+| user | `0x90F79bf6EB2c4f870365E785982E1f101E93b906` | General test user |
+| user2 | `0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65` | Secondary test user |
+
+<Tip>
+  You can import these accounts into MetaMask using the mnemonic or individual private keys from Anvil output.
+</Tip>
+
+## Deployed Contracts
+
+When the devnet starts, it displays a table of all deployed contracts. Key contracts include:
+
+### Core Contracts
+
+- **RootRegistry**: ENS v2 root registry
+- **ETHRegistry**: Registry for `.eth` TLD
+- **ETHRegistrar**: Registrar for `.eth` names
+- **UniversalResolverV2**: Universal resolver for ENS v2
+- **RegistryDatastore**: Singleton storage for all registries (implied)
+
+### Factory Contracts
+
+- **HCAFactory**: Factory for creating hierarchical registries
+- **VerifiableFactory**: Factory for UUPS proxies
+- **SimpleRegistryMetadata**: Metadata provider for registries
+
+### Implementation Contracts
+
+- **PermissionedResolverImpl**: Implementation for permissioned resolvers
+- **UserRegistryImpl**: Implementation for user-owned registries
+- **WrapperRegistryImpl**: Implementation for wrapped registries
+
+### ENS v1 Contracts (for migration testing)
+
+- **ENSRegistryV1**: ENS v1 registry
+- **ETHRegistrarV1**: ENS v1 .eth registrar (BaseRegistrar)
+- **NameWrapperV1**: ENS v1 Name Wrapper
+- **PublicResolverV1**: ENS v1 Public Resolver
+- **UniversalResolverV1**: ENS v1 Universal Resolver
+
+### Utility Contracts
+
+- **StandardRentPriceOracle**: Price oracle for registrations
+- **MockUSDC**: Mock USDC token for testing
+- **MockDAI**: Mock DAI token for testing
+- **BatchGatewayProvider**: Gateway provider for CCIP-Read
+
+## Working with the Devnet
+
+### Using Cast
+
+Interact with the devnet using Foundry's `cast`:
+
+<CodeGroup>
+```bash Get block number
+cast block-number --rpc-url http://localhost:8545
+```
+
+```bash Get ETH balance
+cast balance 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 --rpc-url http://localhost:8545
+```
+
+```bash Call contract (read)
+cast call $ETH_REGISTRY_ADDRESS "ownerOf(uint256)" 1 --rpc-url http://localhost:8545
+```
+
+```bash Send transaction (write)
+cast send $ETH_REGISTRAR_ADDRESS "register(string,address,uint256)" "test" 0xYOUR_ADDRESS 31536000 \
+  --rpc-url http://localhost:8545 \
+  --private-key 0xYOUR_PRIVATE_KEY
+```
+</CodeGroup>
+
+### Using viem/ethers
+
+Connect from JavaScript/TypeScript:
+
+<CodeGroup>
+```typescript viem
+import { createPublicClient, createWalletClient, http } from 'viem';
+import { foundry } from 'viem/chains';
+
+const publicClient = createPublicClient({
+  chain: foundry,
+  transport: http('http://localhost:8545'),
+});
+
+const walletClient = createWalletClient({
+  chain: foundry,
+  transport: http('http://localhost:8545'),
+  account: '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266',
+});
+```
+
+```typescript ethers
+import { ethers } from 'ethers';
+
+const provider = new ethers.JsonRpcProvider('http://localhost:8545');
+const signer = new ethers.Wallet('0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80', provider);
+```
+</CodeGroup>
+
+### Using MetaMask
+
+Add the devnet to MetaMask:
+
+<Steps>
+  <Step title="Open MetaMask">
+    Click on the network dropdown
+  </Step>
+
+  <Step title="Add Network">
+    Select "Add Network" → "Add a network manually"
+  </Step>
+
+  <Step title="Enter network details">
+    - **Network Name**: ENS v2 Devnet
+    - **RPC URL**: `http://localhost:8545`
+    - **Chain ID**: `31337`
+    - **Currency Symbol**: ETH
+  </Step>
+
+  <Step title="Import accounts">
+    Use the mnemonic or private keys from the Anvil output
+  </Step>
+</Steps>
+
+## Advanced Configuration
+
+### Custom Chain ID
+
+Modify `script/setup.ts` to use a custom chain ID:
+
+```typescript
+export const DEFAULT_CHAIN_ID = 0xeeeeed; // Customize this
+```
+
+### Custom Port
+
+The devnet script accepts a `--port` parameter (when called programmatically). For Docker, modify `docker-compose.yml`:
+
+```yaml
+ports:
+  - "8546:8545"  # Map to port 8546 on host
+```
+
+### Additional Test Names
+
+Enable pre-registration of test names:
+
+```bash
+bun run devnet --testNames
+```
+
+This registers additional names for testing and advances the blockchain time.
+
+### Deployment Artifacts
+
+By default, the devnet saves deployment artifacts to `deployments/devnet-local/`. These include:
+
+- Contract addresses
+- ABIs
+- Transaction receipts
+- Deployment metadata
+
+Access deployments programmatically:
+
+```typescript
+import { setupDevnet } from './script/setup.js';
+
+const env = await setupDevnet({
+  port: 8545,
+  saveDeployments: true,
+});
+
+console.log(env.deployment.contracts.RootRegistry.address);
+```
+
+## Devnet API
+
+The `setupDevnet` function returns a rich environment object:
+
+```typescript
+interface DevnetEnvironment {
+  // Pre-configured accounts
+  accounts: Account[];
+  namedAccounts: {
+    deployer: Account;
+    owner: Account;
+    bridger: Account;
+    user: Account;
+    user2: Account;
+  };
+
+  // Deployment instance with all contracts
+  deployment: DeploymentInstance;
+
+  // Utility functions
+  sync(options?: { blocks?: number; warpSec?: number | 'local' }): Promise<bigint>;
+  waitFor(hash: Promise<Hex>): Promise<{ receipt; deployment }>;
+  getBlock(): Promise<Block>;
+  saveState(): Promise<StateSnapshot>;
+  shutdown(): Promise<void>;
+}
+```
+
+### Time Travel
+
+Warp time forward on the devnet:
+
+```typescript
+// Advance by 60 seconds
+await env.sync({ warpSec: 60 });
+
+// Sync to local machine time
+await env.sync({ warpSec: 'local' });
+
+// Mine blocks without time change
+await env.sync({ blocks: 10, warpSec: 0 });
+```
+
+### State Snapshots
+
+Save and restore blockchain state:
+
+```typescript
+// Save current state
+const restore = await env.saveState();
+
+// Make changes
+await env.deployment.contracts.ETHRegistry.write.register(...);
+
+// Restore to saved state
+await restore();
+```
+
+### Helper Methods
+
+Deploy custom contracts:
+
+```typescript
+// Deploy a PermissionedRegistry
+const registry = await env.deployment.deployPermissionedRegistry({
+  account: env.namedAccounts.deployer,
+  roles: ROLES.ALL,
+});
+
+// Deploy a PermissionedResolver via proxy
+const resolver = await env.deployment.deployPermissionedResolver({
+  account: env.namedAccounts.deployer,
+  admin: env.namedAccounts.owner.address,
+  roles: ROLES.ALL,
+  salt: 12345n,
+});
+
+// Deploy a UserRegistry via proxy
+const userRegistry = await env.deployment.deployUserRegistry({
+  account: env.namedAccounts.deployer,
+  salt: 67890n,
+});
+```
+
+## Docker Configuration
+
+The devnet Dockerfile performs the following steps:
+
+<Steps>
+  <Step title="Base image">
+    Uses `oven/bun:1.2.13` with Node.js v24 and Foundry
+  </Step>
+
+  <Step title="Install dependencies">
+    Installs all workspace dependencies with `bun i`
+  </Step>
+
+  <Step title="Build contracts">
+    - Compiles ENS v1 contracts (`lib/ens-contracts`)
+    - Compiles ENS v2 contracts with Forge and Hardhat
+  </Step>
+
+  <Step title="Optimize image">
+    Removes dev dependencies and keeps only runtime requirements
+  </Step>
+
+  <Step title="Run devnet">
+    Executes `bun ./script/runDevnet.ts`
+  </Step>
+</Steps>
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ANVIL_IP_ADDR` | `0.0.0.0` | Anvil bind address |
+| `BATCH_GATEWAY_URLS` | `["x-batch-gateway:true"]` | CCIP-Read gateway URLs |
+| `FOUNDRY_DISABLE_NIGHTLY_WARNING` | `true` | Disable Foundry warnings |
+
+## Troubleshooting
+
+### Port Already in Use
+
+If port 8545 is already in use:
+
+```bash
+# Find the process using port 8545
+lsof -i :8545
+
+# Kill the process
+kill -9 <PID>
+```
+
+Or use a different port with Docker:
+
+```yaml
+ports:
+  - "8546:8545"
+```
+
+### Devnet Won't Start
+
+Ensure all contracts are compiled:
+
+```bash
+cd contracts
+bun run compile
+```
+
+Check that `lib/ens-contracts` is compiled:
+
+```bash
+cd lib/ens-contracts
+bun run compile
+```
+
+### Connection Refused
+
+Wait for the devnet to fully start. Look for the "Ready!" message:
+
+```
+Ready! <1234ms>
+```
+
+The health check endpoint can verify readiness:
+
+```bash
+curl http://localhost:8000
+# Response: healthy
+```
+
+### Docker Container Issues
+
+View container logs:
+
+```bash
+docker logs contracts-v2-devnet-1 -f
+```
+
+Restart the container:
+
+```bash
+docker compose restart devnet
+```
+
+### Reset State
+
+The devnet state persists only in memory. Restart to reset:
+
+<CodeGroup>
+```bash Native
+# Press Ctrl+C to stop, then run again
+bun run devnet
+```
+
+```bash Docker
+docker compose down
+docker compose up -d
+```
+</CodeGroup>
+
+## Production Profiles
+
+The `docker-compose.yml` includes profiles for additional services:
+
+### Default Profile
+
+Includes devnet, Account Abstraction (AA) infrastructure, and mock paymaster:
+
+```bash
+docker compose up -d
+```
+
+Services:
+- `devnet`: ENS v2 devnet
+- `contract-deployer`: Deploys AA contracts
+- `alto`: ERC-4337 bundler (port 4337)
+- `mock-paymaster`: Verifying paymaster (port 3000)
+
+### Local Profile
+
+Runs AA services against an external devnet:
+
+```bash
+# Start local devnet first
+bun run devnet
+
+# In another terminal
+docker compose --profile local up -d
+```
+
+Services connect to `http://host.docker.internal:8545`
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Testing" icon="flask" href="/development/testing">
+    Run tests against the devnet
+  </Card>
+  
+  <Card title="Deployment" icon="rocket" href="/development/deployment">
+    Deploy to testnets and mainnet
+  </Card>
+  
+  <Card title="Contract Integration" icon="code" href="/resolution/universal-resolver">
+    Integrate ENS v2 in your dApp
+  </Card>
+  
+  <Card title="Migration" icon="arrow-right-arrow-left" href="/migration/overview">
+    Migrate from ENS v1
+  </Card>
+</CardGroup>

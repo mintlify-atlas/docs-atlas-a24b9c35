@@ -1,0 +1,886 @@
+---
+title: 'PermissionedRegistry'
+description: 'A tokenized registry with permissions that apply to every subdomain or a specific subdomain'
+---
+
+## Overview
+
+PermissionedRegistry is a core contract that implements a tokenized, permission-based registry for ENS names. It combines ERC1155 token functionality with enhanced access control to manage name registrations, permissions, and hierarchical relationships.
+
+The contract uses a state machine model where names can be:
+- **AVAILABLE**: Not registered, can be registered
+- **RESERVED**: Registered without an owner (placeholder state)
+- **REGISTERED**: Fully registered with an owner and roles
+
+### Key Features
+
+- ERC1155-based tokenization of names
+- Role-based access control for name management
+- Expiry-based registration system
+- Hierarchical parent-child registry relationships
+- Automatic token regeneration on role changes
+- Support for subregistries and resolvers
+
+## Contract Information
+
+**Inherits**: `IRegistry`, `ERC1155Singleton`, `EnhancedAccessControl`, `IPermissionedRegistry`, `MetadataMixin`
+
+**Interface ID**: `0xafff3a63`
+
+## State Structure
+
+### Entry
+
+Internal storage structure for each registered name:
+
+<ParamField path="eacVersionId" type="uint32">
+  Version ID for Enhanced Access Control. Incremented when the name is unregistered/burned.
+</ParamField>
+
+<ParamField path="tokenVersionId" type="uint32">
+  Version ID for the ERC1155 token. Incremented when roles change or token is regenerated.
+</ParamField>
+
+<ParamField path="subregistry" type="IRegistry">
+  The subregistry contract address for this name, if any.
+</ParamField>
+
+<ParamField path="expiry" type="uint64">
+  Unix timestamp when the registration expires.
+</ParamField>
+
+<ParamField path="resolver" type="address">
+  The resolver contract address for this name.
+</ParamField>
+
+### Status
+
+Enum representing registration status:
+
+- `AVAILABLE` (0): Name is not registered or has expired
+- `RESERVED` (1): Name is registered but has no owner (expiry set, owner is address(0))
+- `REGISTERED` (2): Name is fully registered with an owner
+
+### State
+
+Complete state information for a name:
+
+<ResponseField name="status" type="Status">
+  Current registration status (AVAILABLE, RESERVED, or REGISTERED)
+</ResponseField>
+
+<ResponseField name="expiry" type="uint64">
+  Registration expiration timestamp
+</ResponseField>
+
+<ResponseField name="latestOwner" type="address">
+  Current owner address, or address(0) if AVAILABLE/RESERVED
+</ResponseField>
+
+<ResponseField name="tokenId" type="uint256">
+  Current token ID (includes version)
+</ResponseField>
+
+<ResponseField name="resource" type="uint256">
+  Current resource ID for access control
+</ResponseField>
+
+## Constructor
+
+```solidity
+constructor(
+    IHCAFactoryBasic hcaFactory,
+    IRegistryMetadata metadata,
+    address ownerAddress,
+    uint256 ownerRoles
+)
+```
+
+<ParamField path="hcaFactory" type="IHCAFactoryBasic">
+  HCA (Hierarchical Contract Address) factory for equivalence checking
+</ParamField>
+
+<ParamField path="metadata" type="IRegistryMetadata">
+  Metadata provider for token URIs
+</ParamField>
+
+<ParamField path="ownerAddress" type="address">
+  Initial owner address to grant roles to
+</ParamField>
+
+<ParamField path="ownerRoles" type="uint256">
+  Role bitmap to grant to the initial owner
+</ParamField>
+
+## Registration Functions
+
+### register
+
+Registers a new name or converts a reserved name to registered.
+
+```solidity
+function register(
+    string memory label,
+    address owner,
+    IRegistry registry,
+    address resolver,
+    uint256 roleBitmap,
+    uint64 expiry
+) public virtual returns (uint256 tokenId)
+```
+
+<ParamField path="label" type="string">
+  The label to register (e.g., "alice" for alice.eth)
+</ParamField>
+
+<ParamField path="owner" type="address">
+  The address that will own the name. Use address(0) to create a RESERVED name.
+</ParamField>
+
+<ParamField path="registry" type="IRegistry">
+  The subregistry contract to set for this name
+</ParamField>
+
+<ParamField path="resolver" type="address">
+  The resolver contract address
+</ParamField>
+
+<ParamField path="roleBitmap" type="uint256">
+  Roles to grant to the owner. Must be 0 if owner is address(0).
+</ParamField>
+
+<ParamField path="expiry" type="uint64">
+  Expiration timestamp. For RESERVED names, use 0 to keep current expiry.
+</ParamField>
+
+<ResponseField name="tokenId" type="uint256">
+  The token ID of the registered name
+</ResponseField>
+
+**Requirements**:
+- Label must be valid size (1-255 bytes)
+- If AVAILABLE: requires `ROLE_REGISTRAR` on root resource
+- If RESERVED: requires `ROLE_REGISTER_RESERVED` on root resource
+- Cannot overwrite REGISTERED names
+- Expiry must be in the future
+- If owner is address(0), roleBitmap must be 0
+
+**Events Emitted**:
+- `NameRegistered` (if owner != address(0))
+- `NameReserved` (if owner == address(0))
+- `TokenResource`
+- `SubregistryUpdated` (if registry != address(0))
+- `ResolverUpdated` (if resolver != address(0))
+
+**Example**:
+```solidity
+// Register a new name
+uint256 tokenId = registry.register(
+    "alice",
+    0x1234567890123456789012345678901234567890,
+    IRegistry(address(0)),
+    0xResolverAddress,
+    RegistryRolesLib.ROLE_SET_RESOLVER | RegistryRolesLib.ROLE_RENEW,
+    block.timestamp + 365 days
+);
+
+// Reserve a name (no owner)
+uint256 reservedId = registry.register(
+    "reserved",
+    address(0),
+    IRegistry(address(0)),
+    address(0),
+    0,
+    block.timestamp + 365 days
+);
+```
+
+### unregister
+
+Deletes a registered or reserved name, setting its expiry to the current timestamp.
+
+```solidity
+function unregister(uint256 anyId) public virtual
+```
+
+<ParamField path="anyId" type="uint256">
+  The labelhash, token ID, or resource ID of the name to unregister
+</ParamField>
+
+**Requirements**:
+- Name must not be expired
+- Caller must have `ROLE_UNREGISTER` permission
+
+**Events Emitted**:
+- `NameUnregistered`
+
+**Example**:
+```solidity
+uint256 labelId = uint256(keccak256("alice"));
+registry.unregister(labelId);
+```
+
+### renew
+
+Extends the expiration time of a registered or reserved name.
+
+```solidity
+function renew(uint256 anyId, uint64 newExpiry) public override
+```
+
+<ParamField path="anyId" type="uint256">
+  The labelhash, token ID, or resource ID
+</ParamField>
+
+<ParamField path="newExpiry" type="uint64">
+  The new expiration timestamp (must be greater than current expiry)
+</ParamField>
+
+**Requirements**:
+- Name must not be expired
+- Caller must have `ROLE_RENEW` permission
+- New expiry must be greater than current expiry
+
+**Events Emitted**:
+- `ExpiryUpdated`
+
+**Example**:
+```solidity
+uint256 labelId = uint256(keccak256("alice"));
+registry.renew(labelId, block.timestamp + 730 days);
+```
+
+## Configuration Functions
+
+### setSubregistry
+
+Sets or updates the subregistry for a name.
+
+```solidity
+function setSubregistry(uint256 anyId, IRegistry registry) public virtual
+```
+
+<ParamField path="anyId" type="uint256">
+  The labelhash, token ID, or resource ID
+</ParamField>
+
+<ParamField path="registry" type="IRegistry">
+  The new subregistry contract address
+</ParamField>
+
+**Requirements**:
+- Name must not be expired
+- Caller must have `ROLE_SET_SUBREGISTRY` permission
+
+**Events Emitted**:
+- `SubregistryUpdated`
+
+**Example**:
+```solidity
+uint256 labelId = uint256(keccak256("alice"));
+registry.setSubregistry(labelId, IRegistry(newSubregistryAddress));
+```
+
+### setResolver
+
+Sets or updates the resolver for a name.
+
+```solidity
+function setResolver(uint256 anyId, address resolver) public virtual
+```
+
+<ParamField path="anyId" type="uint256">
+  The labelhash, token ID, or resource ID
+</ParamField>
+
+<ParamField path="resolver" type="address">
+  The new resolver contract address
+</ParamField>
+
+**Requirements**:
+- Name must not be expired
+- Caller must have `ROLE_SET_RESOLVER` permission
+
+**Events Emitted**:
+- `ResolverUpdated`
+
+**Example**:
+```solidity
+uint256 labelId = uint256(keccak256("alice"));
+registry.setResolver(labelId, newResolverAddress);
+```
+
+### setParent
+
+Sets the canonical parent registry and label for this registry.
+
+```solidity
+function setParent(
+    IRegistry parent,
+    string memory label
+) public virtual
+```
+
+<ParamField path="parent" type="IRegistry">
+  The parent registry contract
+</ParamField>
+
+<ParamField path="label" type="string">
+  The label of this registry in the parent (e.g., "eth")
+</ParamField>
+
+**Requirements**:
+- Caller must have `ROLE_SET_PARENT` on root resource
+
+**Events Emitted**:
+- `ParentUpdated`
+
+**Example**:
+```solidity
+registry.setParent(IRegistry(parentRegistryAddress), "eth");
+```
+
+## Access Control Functions
+
+### grantRoles
+
+Grants roles to an account for a specific name.
+
+```solidity
+function grantRoles(
+    uint256 anyId,
+    uint256 roleBitmap,
+    address account
+) public override returns (bool)
+```
+
+<ParamField path="anyId" type="uint256">
+  The labelhash, token ID, or resource ID
+</ParamField>
+
+<ParamField path="roleBitmap" type="uint256">
+  Bitmap of roles to grant
+</ParamField>
+
+<ParamField path="account" type="address">
+  The address to grant roles to
+</ParamField>
+
+<ResponseField name="success" type="bool">
+  Returns true if roles were granted
+</ResponseField>
+
+**Note**: Admin roles can only be assigned during registration, not via grantRoles.
+
+**Example**:
+```solidity
+uint256 labelId = uint256(keccak256("alice"));
+registry.grantRoles(
+    labelId,
+    RegistryRolesLib.ROLE_SET_RESOLVER,
+    delegateAddress
+);
+```
+
+### revokeRoles
+
+Revokes roles from an account for a specific name.
+
+```solidity
+function revokeRoles(
+    uint256 anyId,
+    uint256 roleBitmap,
+    address account
+) public override returns (bool)
+```
+
+<ParamField path="anyId" type="uint256">
+  The labelhash, token ID, or resource ID
+</ParamField>
+
+<ParamField path="roleBitmap" type="uint256">
+  Bitmap of roles to revoke
+</ParamField>
+
+<ParamField path="account" type="address">
+  The address to revoke roles from
+</ParamField>
+
+<ResponseField name="success" type="bool">
+  Returns true if roles were revoked
+</ResponseField>
+
+**Example**:
+```solidity
+uint256 labelId = uint256(keccak256("alice"));
+registry.revokeRoles(
+    labelId,
+    RegistryRolesLib.ROLE_SET_RESOLVER,
+    delegateAddress
+);
+```
+
+## Query Functions
+
+### getSubregistry
+
+Returns the subregistry for a label.
+
+```solidity
+function getSubregistry(string calldata label) public view virtual returns (IRegistry)
+```
+
+<ParamField path="label" type="string">
+  The label to query
+</ParamField>
+
+<ResponseField name="subregistry" type="IRegistry">
+  The subregistry contract, or address(0) if none or expired
+</ResponseField>
+
+**Example**:
+```solidity
+IRegistry subregistry = registry.getSubregistry("alice");
+```
+
+### getResolver
+
+Returns the resolver for a label.
+
+```solidity
+function getResolver(string calldata label) public view virtual returns (address)
+```
+
+<ParamField path="label" type="string">
+  The label to query
+</ParamField>
+
+<ResponseField name="resolver" type="address">
+  The resolver address, or address(0) if none or expired
+</ResponseField>
+
+**Example**:
+```solidity
+address resolver = registry.getResolver("alice");
+```
+
+### getParent
+
+Returns the parent registry and label.
+
+```solidity
+function getParent() public view virtual returns (IRegistry parent, string memory label)
+```
+
+<ResponseField name="parent" type="IRegistry">
+  The parent registry contract
+</ResponseField>
+
+<ResponseField name="label" type="string">
+  The label in the parent registry
+</ResponseField>
+
+**Example**:
+```solidity
+(IRegistry parent, string memory label) = registry.getParent();
+```
+
+### getExpiry
+
+Returns the expiration timestamp for a name.
+
+```solidity
+function getExpiry(uint256 anyId) public view returns (uint64)
+```
+
+<ParamField path="anyId" type="uint256">
+  The labelhash, token ID, or resource ID
+</ParamField>
+
+<ResponseField name="expiry" type="uint64">
+  The expiration timestamp
+</ResponseField>
+
+**Example**:
+```solidity
+uint256 labelId = uint256(keccak256("alice"));
+uint64 expiry = registry.getExpiry(labelId);
+```
+
+### getResource
+
+Converts any ID (labelhash, token ID, or resource) to the current resource ID.
+
+```solidity
+function getResource(uint256 anyId) public view returns (uint256)
+```
+
+<ParamField path="anyId" type="uint256">
+  The labelhash, token ID, or resource ID
+</ParamField>
+
+<ResponseField name="resource" type="uint256">
+  The current resource ID for access control
+</ResponseField>
+
+**Example**:
+```solidity
+uint256 labelId = uint256(keccak256("alice"));
+uint256 resource = registry.getResource(labelId);
+```
+
+### getTokenId
+
+Converts any ID to the current token ID.
+
+```solidity
+function getTokenId(uint256 anyId) public view returns (uint256)
+```
+
+<ParamField path="anyId" type="uint256">
+  The labelhash, token ID, or resource ID
+</ParamField>
+
+<ResponseField name="tokenId" type="uint256">
+  The current token ID
+</ResponseField>
+
+**Example**:
+```solidity
+uint256 labelId = uint256(keccak256("alice"));
+uint256 tokenId = registry.getTokenId(labelId);
+```
+
+### getStatus
+
+Returns the registration status of a name.
+
+```solidity
+function getStatus(uint256 anyId) public view returns (Status)
+```
+
+<ParamField path="anyId" type="uint256">
+  The labelhash, token ID, or resource ID
+</ParamField>
+
+<ResponseField name="status" type="Status">
+  AVAILABLE, RESERVED, or REGISTERED
+</ResponseField>
+
+**Example**:
+```solidity
+uint256 labelId = uint256(keccak256("alice"));
+Status status = registry.getStatus(labelId);
+if (status == Status.REGISTERED) {
+    // Name is registered
+}
+```
+
+### getState
+
+Returns complete state information for a name.
+
+```solidity
+function getState(uint256 anyId) public view returns (State memory state)
+```
+
+<ParamField path="anyId" type="uint256">
+  The labelhash, token ID, or resource ID
+</ParamField>
+
+<ResponseField name="state" type="State">
+  Complete state including status, expiry, owner, tokenId, and resource
+</ResponseField>
+
+**Example**:
+```solidity
+uint256 labelId = uint256(keccak256("alice"));
+State memory state = registry.getState(labelId);
+console.log("Status:", uint(state.status));
+console.log("Expiry:", state.expiry);
+console.log("Owner:", state.latestOwner);
+```
+
+### latestOwnerOf
+
+Returns the latest owner of a token, even if expired.
+
+```solidity
+function latestOwnerOf(uint256 tokenId) public view virtual returns (address)
+```
+
+<ParamField path="tokenId" type="uint256">
+  The token ID to query
+</ParamField>
+
+<ResponseField name="owner" type="address">
+  The owner address, or address(0) if never owned
+</ResponseField>
+
+**Example**:
+```solidity
+address owner = registry.latestOwnerOf(tokenId);
+```
+
+### ownerOf
+
+Returns the current owner of a token (respects expiry).
+
+```solidity
+function ownerOf(uint256 tokenId) public view virtual override returns (address)
+```
+
+<ParamField path="tokenId" type="uint256">
+  The token ID to query
+</ParamField>
+
+<ResponseField name="owner" type="address">
+  The owner address, or address(0) if expired or token ID is outdated
+</ResponseField>
+
+**Example**:
+```solidity
+address owner = registry.ownerOf(tokenId);
+```
+
+### roles
+
+Returns the role bitmap for an account.
+
+```solidity
+function roles(
+    uint256 anyId,
+    address account
+) public view override returns (uint256)
+```
+
+<ParamField path="anyId" type="uint256">
+  The labelhash, token ID, or resource ID
+</ParamField>
+
+<ParamField path="account" type="address">
+  The account to query
+</ParamField>
+
+<ResponseField name="roleBitmap" type="uint256">
+  Bitmap of roles held by the account
+</ResponseField>
+
+**Example**:
+```solidity
+uint256 labelId = uint256(keccak256("alice"));
+uint256 userRoles = registry.roles(labelId, userAddress);
+bool canSetResolver = (userRoles & RegistryRolesLib.ROLE_SET_RESOLVER) != 0;
+```
+
+### hasRoles
+
+Checks if an account has specific roles.
+
+```solidity
+function hasRoles(
+    uint256 anyId,
+    uint256 roleBitmap,
+    address account
+) public view override returns (bool)
+```
+
+<ParamField path="anyId" type="uint256">
+  The labelhash, token ID, or resource ID
+</ParamField>
+
+<ParamField path="roleBitmap" type="uint256">
+  Bitmap of roles to check
+</ParamField>
+
+<ParamField path="account" type="address">
+  The account to check
+</ParamField>
+
+<ResponseField name="hasRoles" type="bool">
+  True if the account has all specified roles
+</ResponseField>
+
+**Example**:
+```solidity
+uint256 labelId = uint256(keccak256("alice"));
+bool canManage = registry.hasRoles(
+    labelId,
+    RegistryRolesLib.ROLE_SET_RESOLVER | RegistryRolesLib.ROLE_RENEW,
+    userAddress
+);
+```
+
+## Events
+
+### NameRegistered
+
+Emitted when a name is registered with an owner.
+
+```solidity
+event NameRegistered(
+    uint256 indexed tokenId,
+    bytes32 indexed labelHash,
+    string label,
+    address owner,
+    uint64 expiry,
+    address indexed sender
+)
+```
+
+### NameReserved
+
+Emitted when a name is reserved without an owner.
+
+```solidity
+event NameReserved(
+    uint256 indexed tokenId,
+    bytes32 indexed labelHash,
+    string label,
+    uint64 expiry,
+    address indexed sender
+)
+```
+
+### NameUnregistered
+
+Emitted when a name is unregistered.
+
+```solidity
+event NameUnregistered(uint256 indexed tokenId, address indexed sender)
+```
+
+### ExpiryUpdated
+
+Emitted when a name's expiry is changed.
+
+```solidity
+event ExpiryUpdated(uint256 indexed tokenId, uint64 newExpiry, address indexed sender)
+```
+
+### SubregistryUpdated
+
+Emitted when a name's subregistry is changed.
+
+```solidity
+event SubregistryUpdated(
+    uint256 indexed tokenId,
+    IRegistry subregistry,
+    address indexed sender
+)
+```
+
+### ResolverUpdated
+
+Emitted when a name's resolver is changed.
+
+```solidity
+event ResolverUpdated(uint256 indexed tokenId, address resolver, address indexed sender)
+```
+
+### TokenRegenerated
+
+Emitted when a token is regenerated with a new ID due to role changes.
+
+```solidity
+event TokenRegenerated(uint256 indexed oldTokenId, uint256 indexed newTokenId)
+```
+
+### ParentUpdated
+
+Emitted when the parent registry is changed.
+
+```solidity
+event ParentUpdated(IRegistry indexed parent, string label, address indexed sender)
+```
+
+### TokenResource
+
+Emitted to associate a token with an access control resource.
+
+```solidity
+event TokenResource(uint256 indexed tokenId, uint256 indexed resource)
+```
+
+## Errors
+
+### NameAlreadyRegistered
+
+```solidity
+error NameAlreadyRegistered(string label)
+```
+
+Thrown when attempting to register a name that is already registered.
+
+### NameAlreadyReserved
+
+```solidity
+error NameAlreadyReserved(string label)
+```
+
+Thrown when attempting to reserve or register a name that is already reserved.
+
+### NameExpired
+
+```solidity
+error NameExpired(uint256 tokenId)
+```
+
+Thrown when attempting to modify an expired name.
+
+### CannotReduceExpiration
+
+```solidity
+error CannotReduceExpiration(uint64 oldExpiration, uint64 newExpiration)
+```
+
+Thrown when attempting to reduce a name's expiration time.
+
+### CannotSetPastExpiration
+
+```solidity
+error CannotSetPastExpiration(uint64 expiry)
+```
+
+Thrown when attempting to set an expiration in the past.
+
+### TransferDisallowed
+
+```solidity
+error TransferDisallowed(uint256 tokenId, address from)
+```
+
+Thrown when attempting to transfer a token without the required transfer admin role.
+
+## State Machine
+
+The registry follows this state diagram:
+
+```
+                     register()
+                  +ROLE_REGISTRAR
+      +------------------->----------------------+
+      |                                          |
+      |               renew()                    |    renew()
+      |             +ROLE_RENEW                  |  +ROLE_RENEW
+      |              +------+                    |   +------+
+      |              |      |                    |   |      |
+      v              v      v                    v   v      |
+  AVAILABLE -------> RESERVED -------------> REGISTERED >---+
+      ^   register()    v      register()         v
+      |   w/owner=0     |  +ROLE_REGISTER_        |
+      | +ROLE_REGISTRAR |      _RESERVED           |
+      |                 |                          |
+      +--------<--------+------------<-------------+
+                    unregister()
+                 +ROLE_UNREGISTER
+```
+
+## Notes
+
+- Token IDs include version numbers and are regenerated when roles change
+- Resource IDs for access control are separate from token IDs
+- The "anyId" parameter in most functions accepts labelhash, token ID, or resource ID
+- Admin roles can only be granted during registration, not afterward
+- Transfers automatically transfer all roles to the new owner
+- Transfers require `ROLE_CAN_TRANSFER_ADMIN`

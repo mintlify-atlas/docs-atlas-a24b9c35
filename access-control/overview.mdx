@@ -1,0 +1,176 @@
+---
+title: Access Control Overview
+description: Understanding the role-based access control system in ENS v2
+---
+
+ENS v2 introduces **EnhancedAccessControl (EAC)**, a sophisticated role-based permission system that provides fine-grained control over name operations. Unlike traditional contract-wide roles, EAC enables resource-specific permissions with hierarchical inheritance.
+
+## Key Features
+
+EAC extends traditional access control with powerful capabilities designed for the hierarchical nature of ENS:
+
+<CardGroup cols={2}>
+  <Card title="Resource-Scoped Permissions" icon="lock">
+    Assign roles to specific names rather than contract-wide, enabling precise delegation of permissions
+  </Card>
+  
+  <Card title="Paired Admin Roles" icon="user-shield">
+    Every role has a corresponding admin role that can grant or revoke it, creating a clear permission hierarchy
+  </Card>
+  
+  <Card title="Root Resource Inheritance" icon="diagram-project">
+    Permissions granted at the root level automatically apply to all resources in the contract
+  </Card>
+  
+  <Card title="Gas-Efficient Storage" icon="bolt">
+    Bitmap-based implementation supports up to 32 roles with minimal storage overhead
+  </Card>
+</CardGroup>
+
+## Core Concepts
+
+### Resources
+
+A **resource** is any entity that can have permissions assigned to it. In ENS v2 registries:
+
+- Each name is a unique resource identified by its canonical ID
+- The special resource `0` (ROOT_RESOURCE) represents contract-level permissions
+- Resources are represented as `uint256` values, making the system flexible for any use case
+
+### Roles
+
+Roles are represented as **4-bit nybbles** within a `uint256` bitmap:
+
+- **Regular roles** occupy the lower 128 bits (32 roles: bits 0-127)
+- **Admin roles** occupy the upper 128 bits (32 admin roles: bits 128-255)
+- For any role at bit position `N`, its admin role is at position `N + 128`
+- Multiple roles can be combined using bitwise OR operations
+
+```solidity
+// Example role definitions
+uint256 constant ROLE_SET_RESOLVER = 1 << 12;      // Bit 12
+uint256 constant ROLE_SET_RESOLVER_ADMIN = 1 << 140; // Bit 12 + 128
+```
+
+### Role Assignees
+
+Each role can have up to **15 assignees** per resource. This limit ensures efficient bitmap-based counting while supporting realistic delegation scenarios.
+
+## Permission Inheritance
+
+When checking if an address has a role for a specific resource, EAC combines permissions from two sources:
+
+1. **Resource-specific roles**: Permissions granted directly for that resource
+2. **Root resource roles**: Permissions granted at the ROOT_RESOURCE level
+
+This is implemented using a bitwise OR operation:
+
+```solidity
+function hasRoles(
+    uint256 resource,
+    uint256 roleBitmap,
+    address account
+) public view returns (bool) {
+    return (
+        (_roles[ROOT_RESOURCE][account] | _roles[resource][account]) & roleBitmap
+    ) == roleBitmap;
+}
+```
+
+<Note>
+Root-level permissions are powerful. An account with `ROLE_SET_RESOLVER` at the root level can set the resolver for **any name** in the registry.
+</Note>
+
+## Admin Role Capabilities
+
+### Granting Roles
+
+To grant a role to another account, you must hold the **admin role** for that role:
+
+- Holding `ROLE_SET_RESOLVER_ADMIN` allows granting `ROLE_SET_RESOLVER`
+- Admin roles can be granted at the root level or for specific resources
+- Admin roles can grant themselves (admin roles can grant admin roles)
+
+### Revoking Roles
+
+Revocation follows the same pattern:
+
+- Hold the admin role to revoke the corresponding regular role
+- Admin roles can be revoked from yourself (useful for creating soulbound tokens)
+- In registries, only the name owner can hold admin roles
+
+## Comparison with OpenZeppelin
+
+While OpenZeppelin's AccessControl provides contract-wide roles, ENS v2's EAC adds:
+
+| Feature | OpenZeppelin | ENS v2 EAC |
+|---------|--------------|------------|
+| Scope | Contract-wide | Per-resource |
+| Admin structure | Multi-level | Paired (1:1) |
+| Inheritance | Via role hierarchy | Via ROOT_RESOURCE |
+| Max roles | Unlimited | 32 roles + 32 admin roles |
+| Storage | Hash-based | Bitmap-based |
+| Gas efficiency | Moderate | Optimized |
+
+## Use Cases
+
+### Delegate Resolver Management
+
+Grant an operator permission to update resolvers without giving them transfer rights:
+
+```solidity
+registry.grantRoles(
+    tokenId,
+    RegistryRolesLib.ROLE_SET_RESOLVER,
+    operator
+);
+```
+
+### Global Registry Administrator
+
+Grant contract-wide permissions for a trusted administrator:
+
+```solidity
+registry.grantRootRoles(
+    RegistryRolesLib.ROLE_SET_RESOLVER | RegistryRolesLib.ROLE_RENEW,
+    admin
+);
+```
+
+### Emancipated Subnames
+
+Create names that parent owners cannot interfere with:
+
+1. Create a subregistry with no root roles for the owner
+2. Lock the subregistry into the parent registry
+3. Result: Parent cannot modify subname operations
+
+## Security Considerations
+
+<Warning>
+**Admin Role Restrictions**: In registry contracts, only the name owner can hold admin roles. This prevents scenarios where someone grants admin rights to another account but retains control after transfer.
+</Warning>
+
+<Tip>
+**Audit Trail**: All role changes emit `EACRolesChanged` events with the resource, account, old roles, and new roles, enabling complete audit trails.
+</Tip>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Enhanced Access Control" href="/access-control/enhanced-access-control" icon="shield-halved">
+    Deep dive into the EAC implementation and technical details
+  </Card>
+  
+  <Card title="Registry Roles" href="/access-control/registry-roles" icon="list-check">
+    Learn about the specific roles used in registry contracts
+  </Card>
+  
+  <Card title="Permission Inheritance" href="/access-control/permission-inheritance" icon="diagram-project">
+    Understand how permissions flow from root to resources
+  </Card>
+  
+  <Card title="API Reference" href="/api/access-control/enhanced-access-control" icon="code">
+    Complete API documentation for EnhancedAccessControl
+  </Card>
+</CardGroup>

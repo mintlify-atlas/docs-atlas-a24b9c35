@@ -1,0 +1,627 @@
+---
+title: Registry-Specific Roles
+description: Complete reference for roles in ENS v2 registry contracts
+---
+
+Registry contracts use the EnhancedAccessControl system with a specific set of roles defined in `RegistryRolesLib.sol`. Each role controls specific operations on names within the registry.
+
+## Role Reference Table
+
+| Role | Bit Position | Admin Bit Position | Scope | Description |
+|------|--------------|-------------------|-------|-------------|
+| `ROLE_REGISTRAR` | 0 | 128 | Root only | Register new subnames |
+| `ROLE_REGISTER_RESERVED` | 4 | 132 | Root only | Register reserved names |
+| `ROLE_SET_PARENT` | 8 | 136 | Root only | Change parent registry |
+| `ROLE_UNREGISTER` | 12 | 140 | Root or Token | Unregister names (burn) |
+| `ROLE_RENEW` | 16 | 144 | Root or Token | Extend expiration dates |
+| `ROLE_SET_SUBREGISTRY` | 20 | 148 | Root or Token | Change subregistry contracts |
+| `ROLE_SET_RESOLVER` | 24 | 152 | Root or Token | Change resolver addresses |
+| `ROLE_CAN_TRANSFER_ADMIN` | — | 144 | Token only | Control transfer permissions (admin-only role) |
+| `ROLE_UPGRADE` | 124 | 252 | Root only | Upgrade registry implementation |
+
+<Note>
+**Root only**: Role must be granted at ROOT_RESOURCE (applies to all names)
+
+**Root or Token**: Role can be granted globally or per-name
+
+**Token only**: Role can only be granted for specific names
+</Note>
+
+## Role Definitions
+
+These constants are defined in `/home/daytona/workspace/source/contracts/src/registry/libraries/RegistryRolesLib.sol`:
+
+```solidity RegistryRolesLib.sol
+library RegistryRolesLib {
+    // Root-only roles
+    uint256 internal constant ROLE_REGISTRAR = 1 << 0;
+    uint256 internal constant ROLE_REGISTRAR_ADMIN = ROLE_REGISTRAR << 128;
+    
+    uint256 internal constant ROLE_REGISTER_RESERVED = 1 << 4;
+    uint256 internal constant ROLE_REGISTER_RESERVED_ADMIN = ROLE_REGISTER_RESERVED << 128;
+    
+    uint256 internal constant ROLE_SET_PARENT = 1 << 8;
+    uint256 internal constant ROLE_SET_PARENT_ADMIN = ROLE_SET_PARENT << 128;
+    
+    // Root or token roles
+    uint256 internal constant ROLE_UNREGISTER = 1 << 12;
+    uint256 internal constant ROLE_UNREGISTER_ADMIN = ROLE_UNREGISTER << 128;
+    
+    uint256 internal constant ROLE_RENEW = 1 << 16;
+    uint256 internal constant ROLE_RENEW_ADMIN = ROLE_RENEW << 128;
+    
+    uint256 internal constant ROLE_SET_SUBREGISTRY = 1 << 20;
+    uint256 internal constant ROLE_SET_SUBREGISTRY_ADMIN = ROLE_SET_SUBREGISTRY << 128;
+    
+    uint256 internal constant ROLE_SET_RESOLVER = 1 << 24;
+    uint256 internal constant ROLE_SET_RESOLVER_ADMIN = ROLE_SET_RESOLVER << 128;
+    
+    // Token-only admin role
+    uint256 internal constant ROLE_CAN_TRANSFER_ADMIN = (1 << 28) << 128;
+    
+    // Root-only upgrade role
+    uint256 internal constant ROLE_UPGRADE = 1 << 124;
+    uint256 internal constant ROLE_UPGRADE_ADMIN = ROLE_UPGRADE << 128;
+}
+```
+
+## Root-Only Roles
+
+These roles can only be granted at the `ROOT_RESOURCE` level and apply to all names in the registry.
+
+### ROLE_REGISTRAR
+
+**Purpose**: Register new subnames
+
+**Bit Position**: 0
+
+**Admin**: Bit 128
+
+**Scope**: Root only
+
+The registrar role allows creating new subnames under the registry. This is a root-only role because the resource (name) doesn't exist yet at registration time.
+
+<CodeGroup>
+```solidity Granting
+// Grant registrar permission to a controller contract
+registry.grantRootRoles(
+    RegistryRolesLib.ROLE_REGISTRAR,
+    controllerAddress
+);
+```
+
+```solidity Using
+// Register a new name (requires ROLE_REGISTRAR)
+registry.register(
+    "alice",
+    owner,
+    IRegistry(address(0)),  // No subregistry
+    resolverAddress,
+    0,                       // No additional roles
+    expiry
+);
+```
+</CodeGroup>
+
+**Example Use Case**: ETH Registrar Controller uses this role to register .eth names.
+
+### ROLE_REGISTER_RESERVED
+
+**Purpose**: Register names that are in RESERVED status
+
+**Bit Position**: 4
+
+**Admin**: Bit 132
+
+**Scope**: Root only
+
+Reserved names have an expiry but no owner. This role allows registering them before they expire.
+
+```solidity
+// Reserve a name first (owner = address(0))
+registry.register(
+    "premium",
+    address(0),              // No owner = RESERVED status
+    IRegistry(address(0)),
+    address(0),
+    0,
+    futureExpiry
+);
+
+// Later, register the reserved name (requires ROLE_REGISTER_RESERVED)
+registry.register(
+    "premium",
+    actualOwner,
+    registry,
+    resolver,
+    roles,
+    0  // Use existing expiry
+);
+```
+
+**Example Use Case**: Premium name auctions or phased releases.
+
+### ROLE_SET_PARENT
+
+**Purpose**: Change the parent registry and label
+
+**Bit Position**: 8
+
+**Admin**: Bit 136
+
+**Scope**: Root only
+
+Controls the parent registry relationship for proper hierarchical resolution.
+
+```solidity
+// Update parent registry relationship
+registry.setParent(parentRegistry, "subdomain");
+```
+
+**Example Use Case**: Migrating a subregistry to a different parent.
+
+### ROLE_UPGRADE
+
+**Purpose**: Upgrade registry implementation
+
+**Bit Position**: 124
+
+**Admin**: Bit 252
+
+**Scope**: Root only
+
+Allows upgrading the registry contract (for upgradeable proxies).
+
+```solidity
+// Upgrade to new implementation (requires ROLE_UPGRADE)
+registry.upgradeTo(newImplementation);
+```
+
+**Example Use Case**: Security patches or feature additions to the registry.
+
+## Root or Token Roles
+
+These roles can be granted either at the root level (applying to all names) or for specific names.
+
+### ROLE_UNREGISTER
+
+**Purpose**: Unregister (burn) names
+
+**Bit Position**: 12
+
+**Admin**: Bit 140
+
+**Scope**: Root or Token
+
+Allows burning a name by setting its expiry to the current timestamp.
+
+<CodeGroup>
+```solidity Root Level
+// Grant contract-wide unregister permission
+registry.grantRootRoles(
+    RegistryRolesLib.ROLE_UNREGISTER,
+    moderator
+);
+
+// Moderator can now unregister any name
+registry.unregister(tokenId);
+```
+
+```solidity Token Level
+// Grant unregister permission for a specific name
+registry.grantRoles(
+    tokenId,
+    RegistryRolesLib.ROLE_UNREGISTER,
+    operator
+);
+
+// Operator can unregister only this name
+registry.unregister(tokenId);
+```
+</CodeGroup>
+
+**Example Use Case**: Content moderation or self-service name deletion.
+
+### ROLE_RENEW
+
+**Purpose**: Extend name expiration dates
+
+**Bit Position**: 16
+
+**Admin**: Bit 144
+
+**Scope**: Root or Token
+
+Allows extending the expiry timestamp of a name.
+
+<CodeGroup>
+```solidity Root Level
+// Grant renewal permission to subscription service
+registry.grantRootRoles(
+    RegistryRolesLib.ROLE_RENEW,
+    subscriptionContract
+);
+
+// Subscription contract can renew any name
+registry.renew(tokenId, newExpiry);
+```
+
+```solidity Token Level
+// Delegate renewal to a friend
+registry.grantRoles(
+    tokenId,
+    RegistryRolesLib.ROLE_RENEW,
+    friend
+);
+
+// Friend can renew your specific name
+registry.renew(tokenId, newExpiry);
+```
+</CodeGroup>
+
+<Warning>
+**Cannot Reduce Expiry**: The `renew` function only allows extending expiry, not shortening it. Use `unregister` to expire a name immediately.
+</Warning>
+
+**Example Use Case**: Automated renewal services or gifting renewals.
+
+### ROLE_SET_SUBREGISTRY
+
+**Purpose**: Change the subregistry contract address
+
+**Bit Position**: 20
+
+**Admin**: Bit 148
+
+**Scope**: Root or Token
+
+Controls which registry contract handles subnames under a given name.
+
+<CodeGroup>
+```solidity Root Level
+// Grant global subregistry management
+registry.grantRootRoles(
+    RegistryRolesLib.ROLE_SET_SUBREGISTRY,
+    migrationController
+);
+
+// Migration controller can update any subregistry
+registry.setSubregistry(tokenId, newSubregistry);
+```
+
+```solidity Token Level
+// Delegate subregistry management for your name
+registry.grantRoles(
+    tokenId,
+    RegistryRolesLib.ROLE_SET_SUBREGISTRY,
+    operator
+);
+
+// Operator can manage subregistry for this name
+registry.setSubregistry(tokenId, subregistry);
+```
+</CodeGroup>
+
+**Example Use Case**: Deploying custom subname registries or upgrading subdomain management.
+
+### ROLE_SET_RESOLVER
+
+**Purpose**: Change the resolver contract address
+
+**Bit Position**: 24
+
+**Admin**: Bit 152
+
+**Scope**: Root or Token
+
+Controls which resolver contract handles record lookups for a name.
+
+<CodeGroup>
+```solidity Root Level
+// Grant resolver management to migration tool
+registry.grantRootRoles(
+    RegistryRolesLib.ROLE_SET_RESOLVER,
+    migrationTool
+);
+
+// Migration tool can update any resolver
+registry.setResolver(tokenId, newResolver);
+```
+
+```solidity Token Level
+// Grant resolver permission without transfer rights
+registry.grantRoles(
+    tokenId,
+    RegistryRolesLib.ROLE_SET_RESOLVER,
+    dappOperator
+);
+
+// Dapp can update resolver but not transfer name
+registry.setResolver(tokenId, dappResolver);
+```
+</CodeGroup>
+
+**Example Use Case**: Delegating resolver management to dapps while retaining ownership.
+
+## Token-Only Admin Role
+
+### ROLE_CAN_TRANSFER_ADMIN
+
+**Purpose**: Control NFT transfer permissions
+
+**Bit Position**: 144 (admin role only, no corresponding regular role)
+
+**Admin**: 144
+
+**Scope**: Token only
+
+This is a special **admin-only role** automatically granted to the name owner during registration. It controls whether the name can be transferred as an NFT.
+
+<Note>
+`ROLE_CAN_TRANSFER_ADMIN` is unique because it has no corresponding regular role. It exists only as an admin role.
+</Note>
+
+**Automatic Assignment**:
+
+```solidity
+// During registration, owner automatically receives ROLE_CAN_TRANSFER_ADMIN
+registry.register(
+    "alice",
+    owner,
+    registry,
+    resolver,
+    ROLE_SET_RESOLVER,  // Regular role granted
+    expiry
+);
+// owner now has ROLE_CAN_TRANSFER_ADMIN by default
+```
+
+**Creating Soulbound Names**:
+
+```solidity
+// Revoke transfer permission to make name non-transferable
+registry.revokeRoles(
+    tokenId,
+    RegistryRolesLib.ROLE_CAN_TRANSFER_ADMIN,
+    owner  // Revoking from yourself
+);
+
+// Name is now soulbound (cannot be transferred)
+// Attempting to transfer will revert with TransferDisallowed
+```
+
+<Warning>
+**Irreversible**: Once you revoke `ROLE_CAN_TRANSFER_ADMIN` from yourself, you cannot grant it back. The name becomes permanently soulbound.
+</Warning>
+
+**Transfer Check**:
+
+```solidity PermissionedRegistry.sol:386
+if (!hasRoles(tokenIds[i], RegistryRolesLib.ROLE_CAN_TRANSFER_ADMIN, from)) {
+    revert TransferDisallowed(tokenIds[i], from);
+}
+```
+
+**Example Use Cases**:
+- Identity names that should never be sold
+- Organizational names tied to legal entities
+- Reputation-based names
+
+## Usage Examples
+
+### Grant Multiple Roles
+
+```solidity
+import {RegistryRolesLib} from "./libraries/RegistryRolesLib.sol";
+
+// Combine multiple roles with bitwise OR
+uint256 operatorRoles = RegistryRolesLib.ROLE_SET_RESOLVER |
+                        RegistryRolesLib.ROLE_SET_SUBREGISTRY |
+                        RegistryRolesLib.ROLE_RENEW;
+
+registry.grantRoles(tokenId, operatorRoles, operator);
+```
+
+### Check Specific Role
+
+```solidity
+// Check if user can set resolver
+bool canSetResolver = registry.hasRoles(
+    tokenId,
+    RegistryRolesLib.ROLE_SET_RESOLVER,
+    user
+);
+
+if (canSetResolver) {
+    // Proceed with resolver update
+}
+```
+
+### Delegate Without Transfer
+
+```solidity
+// Grant operational permissions but not transfer rights
+uint256 delegatedRoles = RegistryRolesLib.ROLE_SET_RESOLVER |
+                         RegistryRolesLib.ROLE_SET_SUBREGISTRY;
+
+registry.grantRoles(tokenId, delegatedRoles, delegate);
+
+// delegate can manage resolver and subregistry
+// but CANNOT transfer the name (no ROLE_CAN_TRANSFER_ADMIN)
+```
+
+### Create Emancipated Subnames
+
+```solidity
+// 1. Deploy subregistry with limited root roles
+PermissionedRegistry subregistry = new PermissionedRegistry(
+    hcaFactory,
+    metadata,
+    subOwner,
+    0  // No root roles for owner
+);
+
+// 2. Set as locked subregistry in parent
+parentRegistry.setSubregistry(tokenId, IRegistry(address(subregistry)));
+
+// Result: Parent owner cannot interfere with subnames
+// Even with root-level permissions in parent
+```
+
+### Global Administrator
+
+```solidity
+// Grant contract-wide administrative permissions
+uint256 adminRoles = RegistryRolesLib.ROLE_SET_RESOLVER |
+                     RegistryRolesLib.ROLE_SET_SUBREGISTRY |
+                     RegistryRolesLib.ROLE_RENEW |
+                     RegistryRolesLib.ROLE_UNREGISTER;
+
+registry.grantRootRoles(adminRoles, admin);
+
+// admin can now manage resolver, subregistry, renewal, and unregistration
+// for ALL names in the registry
+```
+
+## Role Restrictions in Registries
+
+### Admin Roles Cannot Be Granted via grantRoles
+
+In `PermissionedRegistry`, the `_getSettableRoles` function is overridden to prevent granting admin roles:
+
+```solidity PermissionedRegistry.sol:447
+function _getSettableRoles(
+    uint256 resource,
+    address account
+) internal view virtual override returns (uint256) {
+    uint256 allRoles = super.roles(resource, account) | super.roles(ROOT_RESOURCE, account);
+    uint256 adminRoleBitmap = allRoles & EACBaseRolesLib.ADMIN_ROLES;
+    return adminRoleBitmap >> 128;  // Only regular roles, not admin roles
+}
+```
+
+<Warning>
+**Registry Restriction**: Admin roles can only be granted during name registration in registry contracts. They cannot be granted afterward using `grantRoles`.
+</Warning>
+
+**Why?** To prevent scenarios where:
+1. Alice grants admin role to Bob
+2. Alice transfers name to Charlie
+3. Bob still has admin control
+
+While auditable, this was deemed too risky.
+
+### Admin Roles Can Be Revoked
+
+Even though admin roles cannot be granted post-registration, they can be revoked:
+
+```solidity
+// Revoke your own admin role to create soulbound token
+registry.revokeRoles(
+    tokenId,
+    RegistryRolesLib.ROLE_CAN_TRANSFER_ADMIN,
+    owner
+);
+```
+
+### Transfer Behavior
+
+When a name is transferred, roles behave as follows:
+
+**Admin Roles**: Transfer to new owner
+
+**Regular Roles (granted to owner)**: Transfer to new owner
+
+**Regular Roles (granted to others)**: Remain intact
+
+```solidity
+// Initial state: Alice owns name
+// Alice has: ROLE_SET_RESOLVER_ADMIN, ROLE_SET_RESOLVER
+// Bob has: ROLE_RENEW (granted by Alice)
+
+// Alice transfers to Charlie
+registry.safeTransferFrom(alice, charlie, tokenId, 1, "");
+
+// Final state:
+// Charlie has: ROLE_SET_RESOLVER_ADMIN, ROLE_SET_RESOLVER
+// Bob still has: ROLE_RENEW
+// Alice has: nothing
+```
+
+This is implemented in `/home/daytona/workspace/source/contracts/src/registry/PermissionedRegistry.sol:394`:
+
+```solidity
+if (externalTransfer) {
+    for (uint256 i; i < tokenIds.length; ++i) {
+        _transferRoles(getResource(tokenIds[i]), from, to, false);
+    }
+}
+```
+
+## Best Practices
+
+<Tip>
+**Use Specific Roles**: Grant only the minimum necessary roles. If an operator only needs to set resolvers, grant `ROLE_SET_RESOLVER` alone.
+</Tip>
+
+<Tip>
+**Root Roles for Services**: Use root-level roles for trusted service contracts that need to operate on many names (e.g., renewal services).
+</Tip>
+
+<Tip>
+**Token Roles for Delegation**: Use token-level roles when delegating permissions for specific names.
+</Tip>
+
+<Warning>
+**Test Transfer Restrictions**: When implementing soulbound names, thoroughly test that transfers are properly blocked.
+</Warning>
+
+## Role Combinations
+
+### Full Operational Control
+
+```solidity
+uint256 fullOperational = RegistryRolesLib.ROLE_SET_RESOLVER |
+                          RegistryRolesLib.ROLE_SET_SUBREGISTRY |
+                          RegistryRolesLib.ROLE_RENEW |
+                          RegistryRolesLib.ROLE_UNREGISTER;
+```
+
+### Resolver Management Only
+
+```solidity
+uint256 resolverOnly = RegistryRolesLib.ROLE_SET_RESOLVER;
+```
+
+### Renewal Service
+
+```solidity
+uint256 renewalService = RegistryRolesLib.ROLE_RENEW;
+```
+
+### Registrar Operations
+
+```solidity
+uint256 registrarOps = RegistryRolesLib.ROLE_REGISTRAR |
+                       RegistryRolesLib.ROLE_REGISTER_RESERVED;
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Permission Inheritance" href="/access-control/permission-inheritance" icon="diagram-project">
+    Learn how root permissions cascade to individual names
+  </Card>
+  
+  <Card title="Enhanced Access Control" href="/access-control/enhanced-access-control" icon="shield-halved">
+    Deep dive into the EAC implementation
+  </Card>
+  
+  <Card title="API Reference" href="/api/access-control/registry-roles-lib" icon="code">
+    Complete API documentation for RegistryRolesLib
+  </Card>
+  
+  <Card title="Permissioned Registry" href="/registry/permissioned-registry" icon="book">
+    Learn about the registry implementation
+  </Card>
+</CardGroup>

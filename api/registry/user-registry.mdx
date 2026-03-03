@@ -1,0 +1,406 @@
+---
+title: 'UserRegistry'
+description: 'Upgradeable user-owned registry that inherits from PermissionedRegistry'
+---
+
+## Overview
+
+UserRegistry is an upgradeable version of PermissionedRegistry designed for user-owned registries. It implements the UUPS (Universal Upgradeable Proxy Standard) pattern, allowing the registry implementation to be upgraded while preserving state.
+
+This contract is typically deployed via the VerifiableFactory and used for user-controlled namespaces within ENS v2.
+
+### Key Features
+
+- All PermissionedRegistry functionality
+- UUPS upgradeable pattern
+- Role-based upgrade authorization
+- Initialization pattern for proxy deployment
+- Secure upgrade controls
+
+## Contract Information
+
+**Inherits**: `Initializable`, `PermissionedRegistry`, `UUPSUpgradeable`
+
+**Deployment**: Via VerifiableFactory as a proxy
+
+**Interface ID**: Includes `UUPSUpgradeable` interface (0x52d1902d)
+
+## Constructor
+
+```solidity
+constructor(
+    IHCAFactoryBasic hcaFactory_,
+    IRegistryMetadata metadataProvider_
+)
+```
+
+<ParamField path="hcaFactory_" type="IHCAFactoryBasic">
+  HCA factory for hierarchical contract address equivalence checking
+</ParamField>
+
+<ParamField path="metadataProvider_" type="IRegistryMetadata">
+  Metadata provider for token URIs (set immutably)
+</ParamField>
+
+**Note**: The constructor disables initializers for the implementation contract. Actual initialization happens via the `initialize()` function on the proxy.
+
+## Initialization
+
+### initialize
+
+Initializes the UserRegistry proxy with an admin and roles.
+
+```solidity
+function initialize(address admin, uint256 roleBitmap) public initializer
+```
+
+<ParamField path="admin" type="address">
+  The address that will receive admin privileges and upgrade rights. Cannot be address(0).
+</ParamField>
+
+<ParamField path="roleBitmap" type="uint256">
+  Bitmap of roles to grant to the admin on the root resource. Should include `ROLE_UPGRADE` and `ROLE_UPGRADE_ADMIN` for upgrade capabilities.
+</ParamField>
+
+**Requirements**:
+- Can only be called once (initializer modifier)
+- Admin address must not be address(0)
+
+**Typical Usage**:
+```solidity
+// Deploy via VerifiableFactory
+address proxy = verifiableFactory.deployProxy(
+    userRegistryImplementation,
+    salt,
+    abi.encodeCall(
+        UserRegistry.initialize,
+        (
+            ownerAddress,
+            RegistryRolesLib.ROLE_UPGRADE |
+            RegistryRolesLib.ROLE_UPGRADE_ADMIN |
+            RegistryRolesLib.ROLE_REGISTRAR |
+            RegistryRolesLib.ROLE_REGISTRAR_ADMIN
+        )
+    )
+);
+```
+
+## Upgrade Functions
+
+### upgradeToAndCall
+
+Upgrades the proxy to a new implementation (inherited from UUPSUpgradeable).
+
+```solidity
+function upgradeToAndCall(address newImplementation, bytes memory data) external payable
+```
+
+<ParamField path="newImplementation" type="address">
+  The address of the new implementation contract
+</ParamField>
+
+<ParamField path="data" type="bytes">
+  Optional calldata to execute after upgrade (typically empty)
+</ParamField>
+
+**Authorization**: Caller must have `ROLE_UPGRADE` on the root resource.
+
+**Example**:
+```solidity
+// Upgrade to new implementation
+userRegistry.upgradeToAndCall(newImplementationAddress, "");
+```
+
+### Authorization Check
+
+The upgrade authorization is enforced by the internal `_authorizeUpgrade` function:
+
+```solidity
+function _authorizeUpgrade(
+    address newImplementation
+) internal override onlyRootRoles(RegistryRolesLib.ROLE_UPGRADE)
+```
+
+This ensures only accounts with `ROLE_UPGRADE` on the root resource can upgrade the contract.
+
+## Inherited Functionality
+
+UserRegistry inherits all functionality from PermissionedRegistry:
+
+### Registration Functions
+- `register()` - Register new names
+- `unregister()` - Delete names
+- `renew()` - Extend expiration
+
+### Configuration Functions
+- `setSubregistry()` - Set subregistry
+- `setResolver()` - Set resolver
+- `setParent()` - Set parent registry
+
+### Access Control Functions
+- `grantRoles()` - Grant roles
+- `revokeRoles()` - Revoke roles
+- `roles()` - Query roles
+- `hasRoles()` - Check roles
+
+### Query Functions
+- `getSubregistry()` - Get subregistry
+- `getResolver()` - Get resolver
+- `getParent()` - Get parent
+- `getExpiry()` - Get expiration
+- `getStatus()` - Get registration status
+- `getState()` - Get complete state
+- `getResource()` - Get resource ID
+- `getTokenId()` - Get token ID
+- `ownerOf()` - Get owner
+- `latestOwnerOf()` - Get latest owner
+
+See [PermissionedRegistry](/api/registry/permissioned-registry) for detailed documentation.
+
+## Deployment Pattern
+
+### Standard Deployment
+
+```solidity
+// 1. Deploy implementation (one-time)
+UserRegistry implementation = new UserRegistry(
+    hcaFactory,
+    metadataProvider
+);
+
+// 2. Deploy proxy for each user registry
+address userRegistry = verifiableFactory.deployProxy(
+    address(implementation),
+    salt,
+    abi.encodeCall(
+        UserRegistry.initialize,
+        (
+            userAddress,
+            RegistryRolesLib.ROLE_UPGRADE |
+            RegistryRolesLib.ROLE_UPGRADE_ADMIN |
+            RegistryRolesLib.ROLE_REGISTRAR |
+            RegistryRolesLib.ROLE_REGISTRAR_ADMIN |
+            RegistryRolesLib.ROLE_SET_PARENT |
+            RegistryRolesLib.ROLE_SET_PARENT_ADMIN
+        )
+    )
+);
+```
+
+### Verifiable Deployment
+
+The VerifiableFactory ensures:
+- Deterministic addresses based on salt
+- Verifiable deployment via CREATE2
+- Proper initialization in one transaction
+
+## Upgrade Safety
+
+### Authorization
+
+Only accounts with `ROLE_UPGRADE` can upgrade:
+
+```solidity
+// Check if account can upgrade
+bool canUpgrade = userRegistry.hasRoles(
+    ROOT_RESOURCE,
+    RegistryRolesLib.ROLE_UPGRADE,
+    accountAddress
+);
+```
+
+### Admin Management
+
+Upgrade admins can grant/revoke upgrade rights:
+
+```solidity
+// Must have ROLE_UPGRADE_ADMIN
+userRegistry.grantRoles(
+    ROOT_RESOURCE,
+    RegistryRolesLib.ROLE_UPGRADE,
+    newUpgraderAddress
+);
+
+userRegistry.revokeRoles(
+    ROOT_RESOURCE,
+    RegistryRolesLib.ROLE_UPGRADE,
+    oldUpgraderAddress
+);
+```
+
+### Storage Safety
+
+UUPS proxies store the implementation address in a standard slot:
+
+```solidity
+// EIP-1967 implementation slot
+bytes32 internal constant _IMPLEMENTATION_SLOT = 
+    0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
+```
+
+New implementations must:
+- Maintain storage layout compatibility
+- Not remove or reorder existing storage variables
+- Only append new storage variables
+
+## Interface Support
+
+### supportsInterface
+
+Extends PermissionedRegistry interface support:
+
+```solidity
+function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool)
+```
+
+**Supported Interfaces**:
+- `IPermissionedRegistry` (0xafff3a63)
+- `IStandardRegistry` (0xb844ab6c)
+- `IRegistry` (0x51f67f40)
+- `IEnhancedAccessControl`
+- `IERC1155Singleton`
+- `IERC165` (0x01ffc9a7)
+- `UUPSUpgradeable` (0x52d1902d)
+
+**Example**:
+```solidity
+bool isUpgradeable = userRegistry.supportsInterface(
+    type(UUPSUpgradeable).interfaceId
+); // true
+```
+
+## Events
+
+Inherits all events from PermissionedRegistry. UUPS upgrades emit:
+
+### Upgraded
+
+```solidity
+event Upgraded(address indexed implementation)
+```
+
+Emitted when the implementation is upgraded.
+
+## Role Requirements
+
+### Recommended Initial Roles
+
+For a user-controlled registry:
+
+```solidity
+uint256 ownerRoles = 
+    RegistryRolesLib.ROLE_UPGRADE |              // Can upgrade
+    RegistryRolesLib.ROLE_UPGRADE_ADMIN |        // Can manage upgraders
+    RegistryRolesLib.ROLE_REGISTRAR |            // Can register names
+    RegistryRolesLib.ROLE_REGISTRAR_ADMIN |      // Can manage registrars
+    RegistryRolesLib.ROLE_REGISTER_RESERVED |    // Can convert reserved names
+    RegistryRolesLib.ROLE_REGISTER_RESERVED_ADMIN |
+    RegistryRolesLib.ROLE_SET_PARENT |           // Can set parent
+    RegistryRolesLib.ROLE_SET_PARENT_ADMIN |     // Can manage parent setters
+    RegistryRolesLib.ROLE_UNREGISTER |           // Can unregister names
+    RegistryRolesLib.ROLE_UNREGISTER_ADMIN |     // Can manage unregistrars
+    RegistryRolesLib.ROLE_RENEW |                // Can renew names
+    RegistryRolesLib.ROLE_RENEW_ADMIN;           // Can manage renewers
+```
+
+### For Subregistry Owners
+
+When registering a name with a subregistry:
+
+```solidity
+uint256 subregistryOwnerRoles = 
+    RegistryRolesLib.ROLE_REGISTRAR |        // Can create subdomains
+    RegistryRolesLib.ROLE_REGISTRAR_ADMIN |  // Can delegate registration
+    RegistryRolesLib.ROLE_RENEW |            // Can renew subdomains
+    RegistryRolesLib.ROLE_RENEW_ADMIN;       // Can delegate renewal
+```
+
+## Security Considerations
+
+### Initialization
+
+- Implementation contract must call `_disableInitializers()` in constructor
+- Proxies must call `initialize()` exactly once
+- Admin address must be carefully chosen (cannot be changed easily)
+
+### Upgrade Path
+
+- Only upgrade to audited implementations
+- Test upgrades on testnet first
+- Verify storage layout compatibility
+- Consider upgrade delay/timelock for production
+
+### Role Management
+
+- Initial admin should secure `ROLE_UPGRADE_ADMIN`
+- Consider multi-sig for upgrade privileges
+- Regularly audit role assignments
+- Use events to monitor role changes
+
+## Example Usage
+
+### Deploy and Configure
+
+```solidity
+// Deploy user registry
+address registry = verifiableFactory.deployProxy(
+    userRegistryImpl,
+    keccak256(abi.encode(userAddress, block.timestamp)),
+    abi.encodeCall(
+        UserRegistry.initialize,
+        (
+            userAddress,
+            RegistryRolesLib.ROLE_UPGRADE |
+            RegistryRolesLib.ROLE_UPGRADE_ADMIN |
+            RegistryRolesLib.ROLE_REGISTRAR |
+            RegistryRolesLib.ROLE_REGISTRAR_ADMIN
+        )
+    )
+);
+
+UserRegistry userReg = UserRegistry(registry);
+
+// Set parent
+userReg.setParent(IRegistry(parentRegistry), "myname");
+
+// Register a subdomain
+userReg.register(
+    "sub",
+    subOwner,
+    IRegistry(address(0)),
+    resolverAddress,
+    RegistryRolesLib.ROLE_SET_RESOLVER | RegistryRolesLib.ROLE_RENEW,
+    block.timestamp + 365 days
+);
+```
+
+### Upgrade Example
+
+```solidity
+// Deploy new implementation
+UserRegistry newImpl = new UserRegistry(hcaFactory, metadataProvider);
+
+// Upgrade (requires ROLE_UPGRADE)
+userReg.upgradeToAndCall(address(newImpl), "");
+
+// Verify upgrade
+assert(userReg.supportsInterface(type(UUPSUpgradeable).interfaceId));
+```
+
+## Differences from PermissionedRegistry
+
+| Feature | PermissionedRegistry | UserRegistry |
+|---------|---------------------|---------------|
+| Upgradeability | Not upgradeable | UUPS upgradeable |
+| Deployment | Direct deployment | Proxy pattern |
+| Initialization | Constructor | `initialize()` function |
+| Upgrade control | N/A | Role-based (`ROLE_UPGRADE`) |
+| Use case | Base implementation | User-owned registries |
+
+## Notes
+
+- UserRegistry is designed for proxy deployment, not direct deployment
+- The implementation contract cannot be initialized or used directly
+- All storage is in the proxy, not the implementation
+- Upgrade authorization is enforced at the contract level
+- The metadata provider is set in the constructor and cannot be changed

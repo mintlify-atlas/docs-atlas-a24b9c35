@@ -1,0 +1,850 @@
+---
+title: 'IEnhancedAccessControl'
+description: 'Enhanced Access Control (EAC) interface for resource-based role management'
+icon: 'key'
+---
+
+## Overview
+
+The `IEnhancedAccessControl` interface provides a sophisticated role-based access control system for ENS v2. It supports resource-based roles, assignee counting, root resource override, and efficient bitmap-based role management.
+
+**Interface Selector:** `0x8f452d62`
+
+## Key Features
+
+- **Resource-based roles**: Assign roles per resource, not globally
+- **Assignee counting**: Track how many accounts have each role
+- **Root resource override**: Grant roles that apply across all resources
+- **Bitmap efficiency**: Manage up to 32 roles and 32 admin roles
+- **Assignee limits**: Up to 15 assignees per role for gas efficiency
+
+## Inheritance
+
+```solidity
+interface IEnhancedAccessControl is IERC165
+```
+
+- Inherits from `IERC165` for interface detection
+- Supports interface ID `0x8f452d62`
+
+## Constants
+
+### ROOT_RESOURCE
+
+```solidity
+function ROOT_RESOURCE() external view returns (uint256);
+```
+
+The `ROOT_RESOURCE` is a special resource ID that acts as a global override. Roles granted in the root resource apply to all other resources.
+
+**Example:**
+
+```solidity
+// Grant admin role in root resource (applies everywhere)
+uint256 rootResource = registry.ROOT_RESOURCE();
+registry.grantRootRoles(ADMIN_ROLE, adminAddress);
+
+// Admin can now manage any resource
+assert(registry.hasRoles(anyResource, ADMIN_ROLE, adminAddress) == true);
+```
+
+## Events
+
+### EACRolesChanged
+
+Emitted when roles are granted or revoked for an account in a resource.
+
+```solidity
+event EACRolesChanged(
+    uint256 indexed resource,
+    address indexed account,
+    uint256 oldRoleBitmap,
+    uint256 newRoleBitmap
+);
+```
+
+<ResponseField name="resource" type="uint256" required>
+  The resource ID where roles changed.
+</ResponseField>
+
+<ResponseField name="account" type="address" required>
+  The account whose roles changed.
+</ResponseField>
+
+<ResponseField name="oldRoleBitmap" type="uint256" required>
+  The previous role bitmap for the account.
+</ResponseField>
+
+<ResponseField name="newRoleBitmap" type="uint256" required>
+  The new role bitmap for the account.
+</ResponseField>
+
+<Info>
+  Role bitmaps encode multiple roles in a single uint256. Each bit position represents a different role. For example, `0x03` means roles at positions 0 and 1 are granted.
+</Info>
+
+**Example:**
+
+```solidity
+// Grant manager and editor roles
+uint256 roles = MANAGER_ROLE | EDITOR_ROLE; // e.g., 0x03
+registry.grantRoles(resource, roles, account);
+// Emits: EACRolesChanged(resource, account, 0, roles)
+
+// Revoke editor role
+registry.revokeRoles(resource, EDITOR_ROLE, account);
+// Emits: EACRolesChanged(resource, account, 0x03, 0x01)
+```
+
+## Errors
+
+### EACUnauthorizedAccountRoles
+
+Thrown when an account lacks required roles to perform an operation.
+
+```solidity
+error EACUnauthorizedAccountRoles(
+    uint256 resource,
+    uint256 roleBitmap,
+    address account
+);
+```
+
+**Error Selector:** `0x4b27a133`
+
+<ResponseField name="resource" type="uint256" required>
+  The resource that was being accessed.
+</ResponseField>
+
+<ResponseField name="roleBitmap" type="uint256" required>
+  The roles that were required.
+</ResponseField>
+
+<ResponseField name="account" type="address" required>
+  The account that lacked permissions.
+</ResponseField>
+
+**Example:**
+
+```solidity
+// This will revert if account lacks manager role
+modifier onlyManager(uint256 resource) {
+    if (!registry.hasRoles(resource, MANAGER_ROLE, msg.sender)) {
+        revert IEnhancedAccessControl.EACUnauthorizedAccountRoles(
+            resource,
+            MANAGER_ROLE,
+            msg.sender
+        );
+    }
+    _;
+}
+```
+
+### EACCannotGrantRoles
+
+Thrown when attempting to grant roles without proper authorization.
+
+```solidity
+error EACCannotGrantRoles(
+    uint256 resource,
+    uint256 roleBitmap,
+    address account
+);
+```
+
+**Error Selector:** `0xd1a3b355`
+
+<ResponseField name="resource" type="uint256" required>
+  The resource where grant was attempted.
+</ResponseField>
+
+<ResponseField name="roleBitmap" type="uint256" required>
+  The roles that could not be granted.
+</ResponseField>
+
+<ResponseField name="account" type="address" required>
+  The account that was to receive roles.
+</ResponseField>
+
+### EACCannotRevokeRoles
+
+Thrown when attempting to revoke roles without proper authorization.
+
+```solidity
+error EACCannotRevokeRoles(
+    uint256 resource,
+    uint256 roleBitmap,
+    address account
+);
+```
+
+**Error Selector:** `0xa604e318`
+
+### EACRootResourceNotAllowed
+
+Thrown when an operation cannot be performed on the root resource.
+
+```solidity
+error EACRootResourceNotAllowed();
+```
+
+**Error Selector:** `0xc2842458`
+
+<Warning>
+  Some operations like name registration cannot use the root resource. Use resource-specific IDs instead.
+</Warning>
+
+### EACMaxAssignees
+
+Thrown when attempting to exceed the maximum assignee limit for a role.
+
+```solidity
+error EACMaxAssignees(uint256 resource, uint256 role);
+```
+
+**Error Selector:** `0xf9165348`
+
+<ResponseField name="resource" type="uint256" required>
+  The resource at maximum capacity.
+</ResponseField>
+
+<ResponseField name="role" type="uint256" required>
+  The role that has too many assignees.
+</ResponseField>
+
+<Info>
+  Each role can have up to 15 assignees per resource. This limit ensures gas-efficient operations.
+</Info>
+
+### EACMinAssignees
+
+Thrown when attempting to go below the minimum assignee requirement.
+
+```solidity
+error EACMinAssignees(uint256 resource, uint256 role);
+```
+
+**Error Selector:** `0x1f80c19b`
+
+### EACInvalidRoleBitmap
+
+Thrown when a role bitmap contains invalid roles.
+
+```solidity
+error EACInvalidRoleBitmap(uint256 roleBitmap);
+```
+
+**Error Selector:** `0x2a7b2d20`
+
+### EACInvalidAccount
+
+Thrown when attempting to grant/revoke roles to/from an invalid account.
+
+```solidity
+error EACInvalidAccount();
+```
+
+**Error Selector:** `0xec3fc592`
+
+## Functions
+
+### grantRoles
+
+Grants all roles in the given role bitmap to an account.
+
+```solidity
+function grantRoles(
+    uint256 resource,
+    uint256 roleBitmap,
+    address account
+) external returns (bool);
+```
+
+<ParamField path="body.resource" type="uint256" required>
+  The resource ID where roles should be granted.
+</ParamField>
+
+<ParamField path="body.roleBitmap" type="uint256" required>
+  Bitmap of roles to grant. Each bit represents a role.
+</ParamField>
+
+<ParamField path="body.account" type="address" required>
+  The account to receive the roles.
+</ParamField>
+
+<ResponseField name="return" type="bool">
+  Returns `true` if roles were successfully granted.
+</ResponseField>
+
+**Example:**
+
+```solidity
+import {MANAGER_ROLE, EDITOR_ROLE} from "./libraries/RegistryRolesLib.sol";
+
+// Grant single role
+registry.grantRoles(resource, MANAGER_ROLE, managerAddress);
+
+// Grant multiple roles using bitmap OR
+uint256 multipleRoles = MANAGER_ROLE | EDITOR_ROLE;
+registry.grantRoles(resource, multipleRoles, operatorAddress);
+
+// Check result
+bool success = registry.grantRoles(resource, EDITOR_ROLE, editorAddress);
+require(success, "Failed to grant roles");
+```
+
+### grantRootRoles
+
+Grants roles in the root resource, which apply across all resources.
+
+```solidity
+function grantRootRoles(
+    uint256 roleBitmap,
+    address account
+) external returns (bool);
+```
+
+<ParamField path="body.roleBitmap" type="uint256" required>
+  Bitmap of roles to grant in the root resource.
+</ParamField>
+
+<ParamField path="body.account" type="address" required>
+  The account to receive the roles.
+</ParamField>
+
+<ResponseField name="return" type="bool">
+  Returns `true` if roles were successfully granted.
+</ResponseField>
+
+<Tip>
+  Root roles are powerful - they apply to all resources. Use sparingly for global administrators.
+</Tip>
+
+**Example:**
+
+```solidity
+import {ADMIN_ROLE} from "./libraries/RegistryRolesLib.sol";
+
+// Grant global admin role
+registry.grantRootRoles(ADMIN_ROLE, globalAdminAddress);
+
+// Admin can now manage any resource
+bool canManageAny = registry.hasRoles(
+    anyResource,
+    ADMIN_ROLE,
+    globalAdminAddress
+);
+assert(canManageAny == true);
+```
+
+### revokeRoles
+
+Revokes all roles in the given role bitmap from an account.
+
+```solidity
+function revokeRoles(
+    uint256 resource,
+    uint256 roleBitmap,
+    address account
+) external returns (bool);
+```
+
+<ParamField path="body.resource" type="uint256" required>
+  The resource ID where roles should be revoked.
+</ParamField>
+
+<ParamField path="body.roleBitmap" type="uint256" required>
+  Bitmap of roles to revoke.
+</ParamField>
+
+<ParamField path="body.account" type="address" required>
+  The account to revoke roles from.
+</ParamField>
+
+<ResponseField name="return" type="bool">
+  Returns `true` if roles were successfully revoked.
+</ResponseField>
+
+**Example:**
+
+```solidity
+// Revoke single role
+registry.revokeRoles(resource, EDITOR_ROLE, editorAddress);
+
+// Revoke all roles
+uint256 currentRoles = registry.roles(resource, account);
+if (currentRoles != 0) {
+    registry.revokeRoles(resource, currentRoles, account);
+}
+```
+
+### revokeRootRoles
+
+Revokes roles from the root resource.
+
+```solidity
+function revokeRootRoles(
+    uint256 roleBitmap,
+    address account
+) external returns (bool);
+```
+
+<ParamField path="body.roleBitmap" type="uint256" required>
+  Bitmap of roles to revoke from the root resource.
+</ParamField>
+
+<ParamField path="body.account" type="address" required>
+  The account to revoke roles from.
+</ParamField>
+
+<ResponseField name="return" type="bool">
+  Returns `true` if roles were successfully revoked.
+</ResponseField>
+
+**Example:**
+
+```solidity
+// Revoke global admin role
+registry.revokeRootRoles(ADMIN_ROLE, formerAdminAddress);
+```
+
+### roles
+
+Returns the roles bitmap for an account in a resource.
+
+```solidity
+function roles(
+    uint256 resource,
+    address account
+) external view returns (uint256);
+```
+
+<ParamField path="query.resource" type="uint256" required>
+  The resource ID to query.
+</ParamField>
+
+<ParamField path="query.account" type="address" required>
+  The account to check.
+</ParamField>
+
+<ResponseField name="return" type="uint256">
+  The role bitmap for the account in the resource.
+</ResponseField>
+
+**Example:**
+
+```solidity
+// Get all roles for an account
+uint256 accountRoles = registry.roles(resource, account);
+
+// Check specific roles using bitwise AND
+bool hasManager = (accountRoles & MANAGER_ROLE) != 0;
+bool hasEditor = (accountRoles & EDITOR_ROLE) != 0;
+
+// Decode all roles
+if (accountRoles & MANAGER_ROLE != 0) console.log("Has MANAGER");
+if (accountRoles & EDITOR_ROLE != 0) console.log("Has EDITOR");
+if (accountRoles & TRANSFER_ADMIN_ROLE != 0) console.log("Has TRANSFER_ADMIN");
+```
+
+### roleCount
+
+Returns the role count bitmap for a resource.
+
+```solidity
+function roleCount(uint256 resource) external view returns (uint256);
+```
+
+<ParamField path="query.resource" type="uint256" required>
+  The resource ID to query.
+</ParamField>
+
+<ResponseField name="return" type="uint256">
+  A bitmap encoding the count of assignees for each role.
+</ResponseField>
+
+<Info>
+  The role count bitmap packs assignee counts for all roles. Each role uses 4 bits to store counts from 0-15.
+</Info>
+
+**Example:**
+
+```solidity
+// Get role count bitmap
+uint256 counts = registry.roleCount(resource);
+
+// Extract count for a specific role (implementation detail)
+// This is typically done internally, not by external callers
+```
+
+### hasRoles
+
+Returns `true` if an account has been granted all the given roles in a resource.
+
+```solidity
+function hasRoles(
+    uint256 resource,
+    uint256 roleBitmap,
+    address account
+) external view returns (bool);
+```
+
+<ParamField path="query.resource" type="uint256" required>
+  The resource ID to check.
+</ParamField>
+
+<ParamField path="query.roleBitmap" type="uint256" required>
+  Bitmap of roles to check for.
+</ParamField>
+
+<ParamField path="query.account" type="address" required>
+  The account to check.
+</ParamField>
+
+<ResponseField name="return" type="bool">
+  Returns `true` if the account has ALL specified roles.
+</ResponseField>
+
+<Warning>
+  This function checks if the account has ALL roles in the bitmap, not just any. Use multiple calls to check for "any of" multiple roles.
+</Warning>
+
+**Example:**
+
+```solidity
+// Check single role
+if (registry.hasRoles(resource, MANAGER_ROLE, msg.sender)) {
+    // Caller has manager role
+}
+
+// Check multiple roles (must have ALL)
+if (registry.hasRoles(resource, MANAGER_ROLE | EDITOR_ROLE, msg.sender)) {
+    // Caller has both manager AND editor roles
+}
+
+// Check for any of multiple roles
+bool hasAny = registry.hasRoles(resource, MANAGER_ROLE, msg.sender) ||
+              registry.hasRoles(resource, EDITOR_ROLE, msg.sender);
+```
+
+### hasRootRoles
+
+Returns `true` if an account has been granted all the given roles in the root resource.
+
+```solidity
+function hasRootRoles(
+    uint256 roleBitmap,
+    address account
+) external view returns (bool);
+```
+
+<ParamField path="query.roleBitmap" type="uint256" required>
+  Bitmap of roles to check for in the root resource.
+</ParamField>
+
+<ParamField path="query.account" type="address" required>
+  The account to check.
+</ParamField>
+
+<ResponseField name="return" type="bool">
+  Returns `true` if the account has ALL specified roles in the root resource.
+</ResponseField>
+
+**Example:**
+
+```solidity
+// Check if account is a global admin
+if (registry.hasRootRoles(ADMIN_ROLE, account)) {
+    // Account is a global administrator
+    // Can perform admin operations on any resource
+}
+```
+
+### hasAssignees
+
+Checks if any of the roles in the given role bitmap has assignees.
+
+```solidity
+function hasAssignees(
+    uint256 resource,
+    uint256 roleBitmap
+) external view returns (bool);
+```
+
+<ParamField path="query.resource" type="uint256" required>
+  The resource ID to check.
+</ParamField>
+
+<ParamField path="query.roleBitmap" type="uint256" required>
+  Bitmap of roles to check.
+</ParamField>
+
+<ResponseField name="return" type="bool">
+  Returns `true` if ANY of the roles has at least one assignee.
+</ResponseField>
+
+**Example:**
+
+```solidity
+// Check if there are any managers
+if (registry.hasAssignees(resource, MANAGER_ROLE)) {
+    console.log("Resource has at least one manager");
+} else {
+    console.log("Resource has no managers - need to assign one");
+}
+
+// Check if there are any managers or editors
+if (registry.hasAssignees(resource, MANAGER_ROLE | EDITOR_ROLE)) {
+    console.log("Resource has managers and/or editors");
+}
+```
+
+### getAssigneeCount
+
+Get the number of assignees for the roles in the given role bitmap.
+
+```solidity
+function getAssigneeCount(
+    uint256 resource,
+    uint256 roleBitmap
+) external view returns (uint256 counts, uint256 mask);
+```
+
+<ParamField path="query.resource" type="uint256" required>
+  The resource ID to query.
+</ParamField>
+
+<ParamField path="query.roleBitmap" type="uint256" required>
+  Bitmap of roles to get counts for.
+</ParamField>
+
+<ResponseField name="counts" type="uint256">
+  Packed counts for each role in the bitmap.
+</ResponseField>
+
+<ResponseField name="mask" type="uint256">
+  Mask indicating which roles had counts.
+</ResponseField>
+
+<Info>
+  This function returns packed data. The counts are encoded with 4 bits per role (0-15 assignees).
+</Info>
+
+**Example:**
+
+```solidity
+// Get assignee counts
+(uint256 counts, uint256 mask) = registry.getAssigneeCount(
+    resource,
+    MANAGER_ROLE | EDITOR_ROLE
+);
+
+// The exact unpacking depends on role positions
+// Typically used internally or by specialized tools
+```
+
+## Usage Examples
+
+### Basic role management
+
+```solidity
+import {IEnhancedAccessControl} from "./interfaces/IEnhancedAccessControl.sol";
+import {MANAGER_ROLE, EDITOR_ROLE} from "./libraries/RegistryRolesLib.sol";
+
+contract RoleManager {
+    IEnhancedAccessControl public eac;
+
+    constructor(address _eac) {
+        eac = IEnhancedAccessControl(_eac);
+    }
+
+    function setupResource(uint256 resource, address admin) external {
+        // Grant admin role
+        eac.grantRoles(resource, MANAGER_ROLE, admin);
+
+        // Verify role was granted
+        require(
+            eac.hasRoles(resource, MANAGER_ROLE, admin),
+            "Role grant failed"
+        );
+    }
+
+    function transferManagement(
+        uint256 resource,
+        address oldManager,
+        address newManager
+    ) external {
+        // Revoke from old manager
+        eac.revokeRoles(resource, MANAGER_ROLE, oldManager);
+
+        // Grant to new manager
+        eac.grantRoles(resource, MANAGER_ROLE, newManager);
+    }
+}
+```
+
+### Permission checking
+
+```solidity
+import {IEnhancedAccessControl} from "./interfaces/IEnhancedAccessControl.sol";
+import {MANAGER_ROLE, EDITOR_ROLE} from "./libraries/RegistryRolesLib.sol";
+
+contract PermissionChecker {
+    IEnhancedAccessControl public eac;
+
+    constructor(address _eac) {
+        eac = IEnhancedAccessControl(_eac);
+    }
+
+    modifier onlyRole(uint256 resource, uint256 roleBitmap) {
+        require(
+            eac.hasRoles(resource, roleBitmap, msg.sender),
+            "Missing required role"
+        );
+        _;
+    }
+
+    modifier onlyRootRole(uint256 roleBitmap) {
+        require(
+            eac.hasRootRoles(roleBitmap, msg.sender),
+            "Missing required root role"
+        );
+        _;
+    }
+
+    function managerOnlyAction(uint256 resource)
+        external
+        onlyRole(resource, MANAGER_ROLE)
+    {
+        // Only accounts with manager role can call this
+    }
+
+    function editorAction(uint256 resource)
+        external
+        onlyRole(resource, EDITOR_ROLE)
+    {
+        // Only accounts with editor role can call this
+    }
+
+    function adminAction()
+        external
+        onlyRootRole(MANAGER_ROLE)
+    {
+        // Only global administrators can call this
+    }
+}
+```
+
+### Multi-role operations
+
+```solidity
+import {IEnhancedAccessControl} from "./interfaces/IEnhancedAccessControl.sol";
+import {MANAGER_ROLE, EDITOR_ROLE, TRANSFER_ADMIN_ROLE} from "./libraries/RegistryRolesLib.sol";
+
+contract MultiRoleManager {
+    IEnhancedAccessControl public eac;
+
+    struct RoleState {
+        bool hasManager;
+        bool hasEditor;
+        bool hasTransferAdmin;
+        uint256 allRoles;
+    }
+
+    constructor(address _eac) {
+        eac = IEnhancedAccessControl(_eac);
+    }
+
+    function getRoleState(uint256 resource, address account)
+        external
+        view
+        returns (RoleState memory state)
+    {
+        state.allRoles = eac.roles(resource, account);
+        state.hasManager = eac.hasRoles(resource, MANAGER_ROLE, account);
+        state.hasEditor = eac.hasRoles(resource, EDITOR_ROLE, account);
+        state.hasTransferAdmin = eac.hasRoles(resource, TRANSFER_ADMIN_ROLE, account);
+
+        return state;
+    }
+
+    function grantFullAccess(uint256 resource, address operator) external {
+        // Grant all operational roles
+        uint256 allRoles = MANAGER_ROLE | EDITOR_ROLE | TRANSFER_ADMIN_ROLE;
+        eac.grantRoles(resource, allRoles, operator);
+    }
+
+    function revokeFullAccess(uint256 resource, address operator) external {
+        // Get current roles and revoke all
+        uint256 currentRoles = eac.roles(resource, operator);
+        if (currentRoles != 0) {
+            eac.revokeRoles(resource, currentRoles, operator);
+        }
+    }
+}
+```
+
+### Assignee counting
+
+```solidity
+import {IEnhancedAccessControl} from "./interfaces/IEnhancedAccessControl.sol";
+import {MANAGER_ROLE} from "./libraries/RegistryRolesLib.sol";
+
+contract AssigneeTracker {
+    IEnhancedAccessControl public eac;
+
+    constructor(address _eac) {
+        eac = IEnhancedAccessControl(_eac);
+    }
+
+    function ensureManager(uint256 resource) external view returns (bool) {
+        return eac.hasAssignees(resource, MANAGER_ROLE);
+    }
+
+    function safeGrantManager(
+        uint256 resource,
+        address newManager
+    ) external {
+        // Ensure there's at least one manager before revoking
+        require(
+            eac.hasAssignees(resource, MANAGER_ROLE),
+            "Cannot revoke last manager"
+        );
+
+        eac.grantRoles(resource, MANAGER_ROLE, newManager);
+    }
+
+    function safeRevokeManager(
+        uint256 resource,
+        address manager
+    ) external {
+        // Check if there are multiple managers
+        bool hasManagers = eac.hasAssignees(resource, MANAGER_ROLE);
+        require(hasManagers, "No managers to revoke");
+
+        // Revoke the role
+        eac.revokeRoles(resource, MANAGER_ROLE, manager);
+
+        // Ensure at least one manager remains
+        require(
+            eac.hasAssignees(resource, MANAGER_ROLE),
+            "Cannot remove last manager"
+        );
+    }
+}
+```
+
+## Related Interfaces
+
+<Columns cols={2}>
+  <Card title="IPermissionedRegistry" icon="shield-halved" href="/api/interfaces/ipermissioned-registry">
+    Registry that uses Enhanced Access Control.
+  </Card>
+  <Card title="RegistryRolesLib" icon="book" href="/api/access-control/registry-roles-lib">
+    Role constants and utilities.
+  </Card>
+</Columns>
+
+<Note>
+  The Enhanced Access Control system uses bitmap-based role management for gas efficiency. Each role is represented by a bit in a uint256, allowing up to 32 different roles per resource.
+</Note>

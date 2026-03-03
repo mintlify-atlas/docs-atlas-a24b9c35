@@ -1,0 +1,863 @@
+---
+title: 'PermissionedResolver'
+description: 'Owned resolver with multi-name support, internal aliasing, and fine-grained role-based permissions'
+---
+
+## Overview
+
+The `PermissionedResolver` is a powerful, upgradeable resolver that supports multiple ENS names with fine-grained permission control and internal aliasing. It implements all standard ENS resolver profiles and adds advanced features like versioning, aliasing, and resource-level permissions.
+
+**Key Features**:
+- Multi-name support with per-name versioning
+- Internal name aliasing with recursive resolution
+- Fine-grained role-based access control per resource
+- Upgradeable via UUPS proxy pattern
+- Full ENS resolver profile support
+
+**Implements**: `IExtendedResolver`, `IMulticallable`, `IABIResolver`, `IAddrResolver`, `IAddressResolver`, `IContentHashResolver`, `IHasAddressResolver`, `IInterfaceResolver`, `INameResolver`, `IPubkeyResolver`, `ITextResolver`, `IVersionableResolver`, `IERC7996`
+
+## Constructor
+
+```solidity
+constructor(IHCAFactoryBasic hcaFactory)
+```
+
+Initializes the resolver implementation. Note: This is an upgradeable contract, use `initialize()` after deployment.
+
+<ParamField path="hcaFactory" type="IHCAFactoryBasic" required>
+  HCA (Hierarchical Contract Authentication) factory for access control
+</ParamField>
+
+## Initialization
+
+### initialize
+
+```solidity
+function initialize(address admin, uint256 roleBitmap) external
+```
+
+Initializes a new PermissionedResolver proxy instance.
+
+<ParamField path="admin" type="address" required>
+  The initial administrator address (cannot be address(0))
+</ParamField>
+
+<ParamField path="roleBitmap" type="uint256" required>
+  Bitmap of roles to grant to the admin. Common patterns:
+  - Full admin: `0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF` (all roles)
+  - Basic management: `ROLE_SET_ADDR | ROLE_SET_TEXT | ROLE_SET_CONTENTHASH`
+</ParamField>
+
+**Example**:
+```solidity
+// Deploy and initialize
+PermissionedResolver implementation = new PermissionedResolver(hcaFactory);
+ERC1967Proxy proxy = new ERC1967Proxy(
+    address(implementation),
+    abi.encodeCall(implementation.initialize, (adminAddress, type(uint256).max))
+);
+PermissionedResolver resolver = PermissionedResolver(address(proxy));
+```
+
+## Permission System
+
+The resolver uses a hierarchical permission system with resource-based access control. Each setter function checks permissions against 4 possible resources:
+
+### Resource Hierarchy
+
+| Resource Type | Description | Resource ID |
+|---------------|-------------|-------------|
+| Global + Any Part | Wildcard access to all names and parts | `resource(0, 0)` |
+| Global + Specific Part | Access to specific part across all names | `resource(0, <part>)` |
+| Specific Name + Any Part | Access to all parts of one name | `resource(<namehash>, 0)` |
+| Specific Name + Specific Part | Access to specific part of one name | `resource(<namehash>, <part>)` |
+
+### Permission Roles
+
+```solidity
+// Write operation roles
+ROLE_SET_ADDR        = 1 << 0   // Set addresses
+ROLE_SET_TEXT        = 1 << 4   // Set text records
+ROLE_SET_CONTENTHASH = 1 << 8   // Set contenthash
+ROLE_SET_PUBKEY      = 1 << 12  // Set public key
+ROLE_SET_ABI         = 1 << 16  // Set ABI data
+ROLE_SET_INTERFACE   = 1 << 20  // Set interface implementer
+ROLE_SET_NAME        = 1 << 24  // Set reverse record name
+ROLE_SET_ALIAS       = 1 << 28  // Create aliases (root only)
+ROLE_CLEAR           = 1 << 32  // Clear all records
+ROLE_UPGRADE         = 1 << 124 // Upgrade contract
+
+// Each role has a corresponding admin role at +128 bits
+ROLE_SET_ADDR_ADMIN = ROLE_SET_ADDR << 128
+```
+
+### Part Identifiers
+
+For fine-grained control, you can restrict access to specific sub-resources:
+
+```solidity
+// Address part for specific coin type
+bytes32 part = PermissionedResolverLib.addrPart(60); // ETH coin type
+
+// Text part for specific key
+bytes32 part = PermissionedResolverLib.textPart("avatar");
+
+// Any part
+bytes32 part = 0;
+```
+
+## Write Functions
+
+### clearRecords
+
+```solidity
+function clearRecords(bytes32 node) external
+```
+
+Clears all records for a node by incrementing its version number. Previous version data becomes inaccessible.
+
+<ParamField path="node" type="bytes32" required>
+  The namehash of the name to clear
+</ParamField>
+
+**Permissions Required**: `ROLE_CLEAR` on `resource(node, 0)`, `resource(0, 0)`, or root
+
+**Events Emitted**:
+- `VersionChanged(bytes32 indexed node, uint64 newVersion)`
+
+**Example**:
+```solidity
+bytes32 node = namehash("vitalik.eth");
+resolver.clearRecords(node);
+// All previous records are now inaccessible
+```
+
+### setAlias
+
+```solidity
+function setAlias(
+    bytes calldata fromName,
+    bytes calldata toName
+) external
+```
+
+Creates an internal alias that rewrites name resolution.
+
+<ParamField path="fromName" type="bytes" required>
+  The source DNS-encoded name (e.g., DNS-encoded "alice.eth")
+</ParamField>
+
+<ParamField path="toName" type="bytes" required>
+  The destination DNS-encoded name (e.g., DNS-encoded "bob.eth")
+</ParamField>
+
+**Permissions Required**: `ROLE_SET_ALIAS` on root resource
+
+**Events Emitted**:
+- `AliasChanged(bytes indexed indexedFromName, bytes indexed indexedToName, bytes fromName, bytes toName)`
+
+**Aliasing Behavior**:
+- Matches longest suffix and rewrites
+- Recursive aliasing is supported
+- Cycles of length 1 apply once
+- Cycles of length 2+ result in out-of-gas
+
+**Example**:
+```solidity
+// Create alias: alice.eth -> bob.eth
+resolver.setAlias(dnsEncode("alice.eth"), dnsEncode("bob.eth"));
+
+// Effects:
+// resolve("alice.eth") -> resolves as "bob.eth"
+// resolve("sub.alice.eth") -> resolves as "sub.bob.eth"
+// resolve("x.y.alice.eth") -> resolves as "x.y.bob.eth"
+```
+
+### setAddr (Ethereum)
+
+```solidity
+function setAddr(bytes32 node, address addr_) external
+```
+
+Sets the Ethereum mainnet address for a name. Equivalent to `setAddr(node, 60, bytes)` with special handling.
+
+<ParamField path="node" type="bytes32" required>
+  The namehash of the name
+</ParamField>
+
+<ParamField path="addr_" type="address" required>
+  The Ethereum address (address(0) is stored as empty bytes)
+</ParamField>
+
+**Permissions Required**: `ROLE_SET_ADDR` with appropriate part/resource
+
+**Events Emitted**:
+- `AddressChanged(bytes32 indexed node, uint256 coinType, bytes newAddress)`
+- `AddrChanged(bytes32 indexed node, address a)` (for ETH coin type only)
+
+### setAddr (Multi-coin)
+
+```solidity
+function setAddr(
+    bytes32 node,
+    uint256 coinType,
+    bytes memory addressBytes
+) public
+```
+
+Sets the address for any cryptocurrency coin type (SLIP-0044).
+
+<ParamField path="node" type="bytes32" required>
+  The namehash of the name
+</ParamField>
+
+<ParamField path="coinType" type="uint256" required>
+  The SLIP-0044 coin type (60 for ETH, 0 for Bitcoin, etc.)
+</ParamField>
+
+<ParamField path="addressBytes" type="bytes" required>
+  The encoded address bytes (must be 0 or 20 bytes for EVM chains)
+</ParamField>
+
+**Permissions Required**: `ROLE_SET_ADDR` on:
+- `resource(node, addrPart(coinType))`
+- `resource(0, addrPart(coinType))`
+- `resource(node, 0)`
+- `resource(0, 0)`
+
+**Events Emitted**:
+- `AddressChanged(bytes32 indexed node, uint256 coinType, bytes newAddress)`
+- `AddrChanged(bytes32 indexed node, address a)` (if coinType == 60)
+
+**Example**:
+```solidity
+// Set Ethereum address
+resolver.setAddr(node, 60, abi.encodePacked(ethAddress));
+
+// Set Bitcoin address
+resolver.setAddr(node, 0, bitcoinAddressBytes);
+
+// Set Linea address (EVM chain 59144)
+resolver.setAddr(node, 0x800000000000e39990, abi.encodePacked(lineaAddress));
+```
+
+### setText
+
+```solidity
+function setText(
+    bytes32 node,
+    string calldata key,
+    string calldata value
+) external
+```
+
+Sets a text record for a name.
+
+<ParamField path="node" type="bytes32" required>
+  The namehash of the name
+</ParamField>
+
+<ParamField path="key" type="string" required>
+  The text record key (e.g., "avatar", "description", "url", "email")
+</ParamField>
+
+<ParamField path="value" type="string" required>
+  The text record value
+</ParamField>
+
+**Permissions Required**: `ROLE_SET_TEXT` on:
+- `resource(node, textPart(key))`
+- `resource(0, textPart(key))`
+- `resource(node, 0)`
+- `resource(0, 0)`
+
+**Events Emitted**:
+- `TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)`
+
+**Example**:
+```solidity
+// Set standard text records
+resolver.setText(node, "avatar", "https://example.com/avatar.png");
+resolver.setText(node, "description", "ENS developer");
+resolver.setText(node, "url", "https://example.com");
+resolver.setText(node, "email", "user@example.com");
+
+// Set custom text records
+resolver.setText(node, "com.twitter", "@username");
+resolver.setText(node, "com.github", "username");
+```
+
+### setContenthash
+
+```solidity
+function setContenthash(
+    bytes32 node,
+    bytes calldata hash
+) external
+```
+
+Sets the content hash for a name (IPFS, IPNS, Swarm, etc.).
+
+<ParamField path="node" type="bytes32" required>
+  The namehash of the name
+</ParamField>
+
+<ParamField path="hash" type="bytes" required>
+  The contenthash bytes (ENSIP-7 format)
+</ParamField>
+
+**Permissions Required**: `ROLE_SET_CONTENTHASH`
+
+**Events Emitted**:
+- `ContenthashChanged(bytes32 indexed node, bytes hash)`
+
+**Example**:
+```solidity
+// Set IPFS contenthash
+bytes memory ipfsHash = hex"e301..." // ENSIP-7 encoded
+resolver.setContenthash(node, ipfsHash);
+```
+
+### setPubkey
+
+```solidity
+function setPubkey(
+    bytes32 node,
+    bytes32 x,
+    bytes32 y
+) external
+```
+
+Sets the SECP256k1 public key for a name.
+
+<ParamField path="node" type="bytes32" required>
+  The namehash of the name
+</ParamField>
+
+<ParamField path="x" type="bytes32" required>
+  The x coordinate of the public key
+</ParamField>
+
+<ParamField path="y" type="bytes32" required>
+  The y coordinate of the public key
+</ParamField>
+
+**Permissions Required**: `ROLE_SET_PUBKEY`
+
+**Events Emitted**:
+- `PubkeyChanged(bytes32 indexed node, bytes32 x, bytes32 y)`
+
+### setName
+
+```solidity
+function setName(
+    bytes32 node,
+    string calldata primary
+) external
+```
+
+Sets the reverse record name for a node.
+
+<ParamField path="node" type="bytes32" required>
+  The namehash of the name
+</ParamField>
+
+<ParamField path="primary" type="string" required>
+  The primary name string
+</ParamField>
+
+**Permissions Required**: `ROLE_SET_NAME`
+
+**Events Emitted**:
+- `NameChanged(bytes32 indexed node, string name)`
+
+### setABI
+
+```solidity
+function setABI(
+    bytes32 node,
+    uint256 contentType,
+    bytes calldata data
+) external
+```
+
+Sets ABI data for a contract.
+
+<ParamField path="node" type="bytes32" required>
+  The namehash of the name
+</ParamField>
+
+<ParamField path="contentType" type="uint256" required>
+  The content type (must be a power of 2: 1, 2, 4, 8...)
+</ParamField>
+
+<ParamField path="data" type="bytes" required>
+  The ABI data
+</ParamField>
+
+**Permissions Required**: `ROLE_SET_ABI`
+
+**Events Emitted**:
+- `ABIChanged(bytes32 indexed node, uint256 indexed contentType)`
+
+### setInterface
+
+```solidity
+function setInterface(
+    bytes32 node,
+    bytes4 interfaceId,
+    address implementer
+) external
+```
+
+Sets the implementer of an EIP-165 interface.
+
+<ParamField path="node" type="bytes32" required>
+  The namehash of the name
+</ParamField>
+
+<ParamField path="interfaceId" type="bytes4" required>
+  The EIP-165 interface identifier
+</ParamField>
+
+<ParamField path="implementer" type="address" required>
+  The address of the contract implementing the interface
+</ParamField>
+
+**Permissions Required**: `ROLE_SET_INTERFACE`
+
+**Events Emitted**:
+- `InterfaceChanged(bytes32 indexed node, bytes4 indexed interfaceID, address implementer)`
+
+### multicall
+
+```solidity
+function multicall(bytes[] calldata calls) public returns (bytes[] memory results)
+```
+
+Executes multiple write operations in a single transaction. Reverts with the first error encountered.
+
+<ParamField path="calls" type="bytes[]" required>
+  Array of ABI-encoded function calls to execute
+</ParamField>
+
+<ResponseField name="results" type="bytes[]">
+  Array of return values from each call
+</ResponseField>
+
+**Example**:
+```solidity
+// Set multiple records in one transaction
+bytes[] memory calls = new bytes[](3);
+calls[0] = abi.encodeCall(resolver.setAddr, (node, ethAddress));
+calls[1] = abi.encodeCall(resolver.setText, (node, "avatar", "https://..."));
+calls[2] = abi.encodeCall(resolver.setContenthash, (node, ipfsHash));
+
+resolver.multicall(calls);
+```
+
+### multicallWithNodeCheck
+
+```solidity
+function multicallWithNodeCheck(
+    bytes32,
+    bytes[] calldata calls
+) external returns (bytes[] memory)
+```
+
+Alias for `multicall()`. The node parameter is ignored since there is no trusted operator concept.
+
+<ParamField path="" type="bytes32">
+  Ignored node parameter (for interface compatibility)
+</ParamField>
+
+<ParamField path="calls" type="bytes[]" required>
+  Array of ABI-encoded function calls
+</ParamField>
+
+## Read Functions
+
+### resolve
+
+```solidity
+function resolve(
+    bytes calldata fromName,
+    bytes calldata fromData
+) external view returns (bytes memory)
+```
+
+Resolves a query with aliasing support. Implements `IExtendedResolver`.
+
+<ParamField path="fromName" type="bytes" required>
+  The DNS-encoded name being queried
+</ParamField>
+
+<ParamField path="fromData" type="bytes" required>
+  The ABI-encoded resolver call data
+</ParamField>
+
+<ResponseField name="return" type="bytes">
+  The ABI-encoded response data
+</ResponseField>
+
+**Example**:
+```solidity
+// Query through resolve interface
+bytes memory query = abi.encodeCall(IAddrResolver.addr, (node));
+bytes memory result = resolver.resolve(dnsName, query);
+address ethAddr = abi.decode(result, (address));
+```
+
+### getAlias
+
+```solidity
+function getAlias(bytes memory fromName) public view returns (bytes memory toName)
+```
+
+Determines the final name after all aliasing is applied.
+
+<ParamField path="fromName" type="bytes" required>
+  The source DNS-encoded name
+</ParamField>
+
+<ResponseField name="toName" type="bytes">
+  The destination DNS-encoded name, or empty if not aliased
+</ResponseField>
+
+**Example**:
+```solidity
+bytes memory aliased = resolver.getAlias(dnsEncode("alice.eth"));
+if (aliased.length > 0) {
+    // Name is aliased to 'aliased'
+}
+```
+
+### addr (Ethereum)
+
+```solidity
+function addr(bytes32 node) public view returns (address payable)
+```
+
+Gets the Ethereum address for a name.
+
+<ParamField path="node" type="bytes32" required>
+  The namehash of the name
+</ParamField>
+
+<ResponseField name="return" type="address">
+  The Ethereum address, or address(0) if not set
+</ResponseField>
+
+### addr (Multi-coin)
+
+```solidity
+function addr(
+    bytes32 node,
+    uint256 coinType
+) public view returns (bytes memory addressBytes)
+```
+
+Gets the address for any coin type.
+
+<ParamField path="node" type="bytes32" required>
+  The namehash of the name
+</ParamField>
+
+<ParamField path="coinType" type="uint256" required>
+  The SLIP-0044 coin type
+</ParamField>
+
+<ResponseField name="addressBytes" type="bytes">
+  The encoded address bytes. For EVM chains, falls back to default EVM address (coin type with chain ID 0) if specific chain address is not set.
+</ResponseField>
+
+### text
+
+```solidity
+function text(
+    bytes32 node,
+    string calldata key
+) external view returns (string memory)
+```
+
+Gets a text record value.
+
+<ParamField path="node" type="bytes32" required>
+  The namehash of the name
+</ParamField>
+
+<ParamField path="key" type="string" required>
+  The text record key
+</ParamField>
+
+<ResponseField name="return" type="string">
+  The text record value, or empty string if not set
+</ResponseField>
+
+### contenthash
+
+```solidity
+function contenthash(bytes32 node) external view returns (bytes memory)
+```
+
+Gets the content hash for a name.
+
+<ParamField path="node" type="bytes32" required>
+  The namehash of the name
+</ParamField>
+
+<ResponseField name="return" type="bytes">
+  The contenthash bytes, or empty if not set
+</ResponseField>
+
+### pubkey
+
+```solidity
+function pubkey(
+    bytes32 node
+) external view returns (bytes32 x, bytes32 y)
+```
+
+Gets the SECP256k1 public key.
+
+<ParamField path="node" type="bytes32" required>
+  The namehash of the name
+</ParamField>
+
+<ResponseField name="x" type="bytes32">
+  The x coordinate
+</ResponseField>
+
+<ResponseField name="y" type="bytes32">
+  The y coordinate
+</ResponseField>
+
+### name
+
+```solidity
+function name(bytes32 node) external view returns (string memory)
+```
+
+Gets the reverse record name.
+
+<ParamField path="node" type="bytes32" required>
+  The namehash
+</ParamField>
+
+<ResponseField name="return" type="string">
+  The name string
+</ResponseField>
+
+### ABI
+
+```solidity
+function ABI(
+    bytes32 node,
+    uint256 contentTypes
+) external view returns (uint256 contentType, bytes memory data)
+```
+
+Gets ABI data for requested content types.
+
+<ParamField path="node" type="bytes32" required>
+  The namehash of the name
+</ParamField>
+
+<ParamField path="contentTypes" type="uint256" required>
+  Bitmap of acceptable content types
+</ParamField>
+
+<ResponseField name="contentType" type="uint256">
+  The matched content type, or 0 if none found
+</ResponseField>
+
+<ResponseField name="data" type="bytes">
+  The ABI data
+</ResponseField>
+
+### hasAddr
+
+```solidity
+function hasAddr(
+    bytes32 node,
+    uint256 coinType
+) external view returns (bool)
+```
+
+Checks if an address is set for a coin type.
+
+<ParamField path="node" type="bytes32" required>
+  The namehash of the name
+</ParamField>
+
+<ParamField path="coinType" type="uint256" required>
+  The coin type to check
+</ParamField>
+
+<ResponseField name="return" type="bool">
+  True if address is set, false otherwise
+</ResponseField>
+
+### interfaceImplementer
+
+```solidity
+function interfaceImplementer(
+    bytes32 node,
+    bytes4 interfaceId
+) external view returns (address implementer)
+```
+
+Gets the implementer of an interface.
+
+<ParamField path="node" type="bytes32" required>
+  The namehash of the name
+</ParamField>
+
+<ParamField path="interfaceId" type="bytes4" required>
+  The EIP-165 interface ID
+</ParamField>
+
+<ResponseField name="implementer" type="address">
+  The implementer address, or address(0) if not set
+</ResponseField>
+
+### recordVersions
+
+```solidity
+function recordVersions(bytes32 node) external view returns (uint64)
+```
+
+Gets the current version number for a node's records.
+
+<ParamField path="node" type="bytes32" required>
+  The namehash of the name
+</ParamField>
+
+<ResponseField name="return" type="uint64">
+  The current version number (incremented by clearRecords)
+</ResponseField>
+
+### supportsInterface
+
+```solidity
+function supportsInterface(bytes4 interfaceId) public view returns (bool)
+```
+
+EIP-165 interface detection.
+
+### supportsFeature
+
+```solidity
+function supportsFeature(bytes4 feature) external pure returns (bool)
+```
+
+ERC-7996 feature detection. Returns true for `RESOLVE_MULTICALL`.
+
+## Events
+
+### AliasChanged
+
+```solidity
+event AliasChanged(
+    bytes indexed indexedFromName,
+    bytes indexed indexedToName,
+    bytes fromName,
+    bytes toName
+)
+```
+
+Emitted when an alias is created or modified.
+
+### Standard ENS Events
+
+The contract also emits all standard ENS resolver events:
+- `AddressChanged(bytes32 indexed node, uint256 coinType, bytes newAddress)`
+- `AddrChanged(bytes32 indexed node, address a)`
+- `TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)`
+- `ContenthashChanged(bytes32 indexed node, bytes hash)`
+- `PubkeyChanged(bytes32 indexed node, bytes32 x, bytes32 y)`
+- `NameChanged(bytes32 indexed node, string name)`
+- `ABIChanged(bytes32 indexed node, uint256 indexed contentType)`
+- `InterfaceChanged(bytes32 indexed node, bytes4 indexed interfaceID, address implementer)`
+- `VersionChanged(bytes32 indexed node, uint64 newVersion)`
+
+## Errors
+
+### UnsupportedResolverProfile
+
+```solidity
+error UnsupportedResolverProfile(bytes4 selector)
+```
+
+Thrown when an unsupported resolver function is called.
+
+**Error Selector**: `0x7b1c461b`
+
+### InvalidEVMAddress
+
+```solidity
+error InvalidEVMAddress(bytes addressBytes)
+```
+
+Thrown when setting an EVM address that is not 0 or 20 bytes.
+
+**Error Selector**: `0x8d666f60`
+
+### InvalidContentType
+
+```solidity
+error InvalidContentType(uint256 contentType)
+```
+
+Thrown when ABI content type is not a power of 2.
+
+**Error Selector**: `0x5742bb26`
+
+## Complete Integration Example
+
+```solidity
+// Deploy and configure a PermissionedResolver
+contract ResolverManager {
+    PermissionedResolver public resolver;
+    
+    function deployResolver(address hcaFactory, address admin) external {
+        // Deploy implementation
+        PermissionedResolver impl = new PermissionedResolver(IHCAFactoryBasic(hcaFactory));
+        
+        // Deploy proxy
+        ERC1967Proxy proxy = new ERC1967Proxy(
+            address(impl),
+            abi.encodeCall(impl.initialize, (admin, type(uint256).max))
+        );
+        
+        resolver = PermissionedResolver(address(proxy));
+    }
+    
+    function setupName(bytes32 node, address owner) external {
+        // Grant owner full control over their name
+        uint256 roles = PermissionedResolverLib.ROLE_SET_ADDR |
+                        PermissionedResolverLib.ROLE_SET_TEXT |
+                        PermissionedResolverLib.ROLE_SET_CONTENTHASH;
+        
+        uint256 resource = PermissionedResolverLib.resource(node, 0);
+        resolver.grantRoles(resource, roles, owner);
+    }
+    
+    function grantTextPermission(
+        bytes32 node,
+        address user,
+        string memory textKey
+    ) external {
+        // Grant permission to set a specific text key
+        bytes32 part = PermissionedResolverLib.textPart(textKey);
+        uint256 resource = PermissionedResolverLib.resource(node, part);
+        resolver.grantRoles(resource, PermissionedResolverLib.ROLE_SET_TEXT, user);
+    }
+}
+```
+
+## Related Contracts
+
+- **PermissionedResolverLib**: Storage layout and permission helper functions
+- **EnhancedAccessControl**: Role-based access control system
+- **HCAContext**: Hierarchical Contract Authentication context

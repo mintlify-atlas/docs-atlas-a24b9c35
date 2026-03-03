@@ -1,0 +1,568 @@
+---
+title: "ETHRegistrar"
+description: "Contract for registering and renewing .eth second-level domains using a commit-reveal process"
+---
+
+## Overview
+
+The `ETHRegistrar` contract manages the registration and renewal of `.eth` second-level domain names. It implements a two-step commit-reveal registration process to prevent front-running and supports multiple ERC-20 payment tokens.
+
+<Info>
+The registrar uses a commit-reveal scheme to ensure fair registration. Users must first commit to a registration, wait for a minimum period, then reveal and complete the registration within a maximum time window.
+</Info>
+
+## Key Features
+
+- **Commit-reveal registration**: Prevents front-running attacks by requiring a two-step process
+- **Flexible pricing**: Delegates pricing to a configurable `RentPriceOracle`
+- **Multi-token payments**: Accepts multiple ERC-20 tokens for registration fees
+- **Automatic permissions**: Grants registrants full control over their registered names
+- **Renewal support**: Allows extending registrations before expiry
+
+## Contract Architecture
+
+```solidity
+contract ETHRegistrar is IETHRegistrar, EnhancedAccessControl
+```
+
+### Immutable Configuration
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `REGISTRY` | `IPermissionedRegistry` | The `.eth` registry contract |
+| `BENEFICIARY` | `address` | Recipient of registration payments |
+| `MIN_COMMITMENT_AGE` | `uint64` | Minimum wait time after commit (e.g., 60 seconds) |
+| `MAX_COMMITMENT_AGE` | `uint64` | Maximum validity period for commitments (e.g., 24 hours) |
+| `MIN_REGISTER_DURATION` | `uint64` | Minimum registration duration (e.g., 28 days) |
+
+### Storage
+
+```solidity
+IRentPriceOracle public rentPriceOracle;
+mapping(bytes32 commitment => uint64 commitTime) public commitmentAt;
+```
+
+## Registration Process
+
+### Step 1: Generate Commitment
+
+Create a commitment hash that binds all registration parameters without revealing them onchain.
+
+```solidity
+function makeCommitment(
+    string calldata label,
+    address owner,
+    bytes32 secret,
+    IRegistry subregistry,
+    address resolver,
+    uint64 duration,
+    bytes32 referrer
+) public pure returns (bytes32)
+```
+
+<CodeGroup>
+
+```javascript ethers.js
+import { ethers } from 'ethers';
+
+// Generate a random secret
+const secret = ethers.hexlify(ethers.randomBytes(32));
+
+// Create commitment hash
+const commitment = ethers.keccak256(
+  ethers.AbiCoder.defaultAbiCoder().encode(
+    ['string', 'address', 'bytes32', 'address', 'address', 'uint64', 'bytes32'],
+    [
+      'vitalik',              // label
+      ownerAddress,           // owner
+      secret,                 // secret
+      subregistryAddress,     // subregistry
+      resolverAddress,        // resolver
+      31557600,              // duration (1 year in seconds)
+      ethers.ZeroHash        // referrer
+    ]
+  )
+);
+```
+
+```solidity Solidity
+// Generate commitment hash
+bytes32 secret = keccak256(abi.encodePacked(msg.sender, block.timestamp));
+bytes32 commitment = registrar.makeCommitment(
+    "vitalik",
+    msg.sender,
+    secret,
+    IRegistry(address(0)),
+    resolverAddress,
+    365.25 days,
+    bytes32(0)
+);
+```
+
+</CodeGroup>
+
+### Step 2: Submit Commitment
+
+Submit the commitment hash onchain. This starts the waiting period.
+
+```solidity
+function commit(bytes32 commitment) external
+```
+
+<CodeGroup>
+
+```javascript ethers.js
+// Submit commitment
+const tx = await registrar.commit(commitment);
+await tx.wait();
+
+console.log('Commitment submitted. Wait at least MIN_COMMITMENT_AGE before registering.');
+```
+
+```solidity Solidity
+// Submit commitment
+registrar.commit(commitment);
+// Wait at least MIN_COMMITMENT_AGE before proceeding
+```
+
+</CodeGroup>
+
+<Warning>
+You must wait at least `MIN_COMMITMENT_AGE` (typically 60 seconds) after committing before you can register. The commitment expires after `MAX_COMMITMENT_AGE` (typically 24 hours).
+</Warning>
+
+### Step 3: Complete Registration
+
+After waiting the required time, reveal the commitment parameters and complete registration.
+
+```solidity
+function register(
+    string calldata label,
+    address owner,
+    bytes32 secret,
+    IRegistry subregistry,
+    address resolver,
+    uint64 duration,
+    IERC20 paymentToken,
+    bytes32 referrer
+) external returns (uint256 tokenId)
+```
+
+<CodeGroup>
+
+```javascript ethers.js
+// Wait for MIN_COMMITMENT_AGE (e.g., 60 seconds)
+await new Promise(resolve => setTimeout(resolve, 65000));
+
+// Approve payment token
+const price = await registrar.rentPrice('vitalik', ownerAddress, duration, usdcAddress);
+const totalCost = price.base + price.premium;
+await usdc.approve(registrarAddress, totalCost);
+
+// Complete registration
+const registerTx = await registrar.register(
+  'vitalik',              // label
+  ownerAddress,           // owner
+  secret,                 // secret from step 1
+  subregistryAddress,     // subregistry
+  resolverAddress,        // resolver
+  31557600,              // duration
+  usdcAddress,           // paymentToken
+  ethers.ZeroHash        // referrer
+);
+
+const receipt = await registerTx.wait();
+const tokenId = receipt.logs.find(log => log.eventName === 'NameRegistered').args.tokenId;
+console.log(`Registered vitalik.eth with tokenId: ${tokenId}`);
+```
+
+```solidity Solidity
+// Calculate price
+(uint256 base, uint256 premium) = registrar.rentPrice(
+    "vitalik",
+    msg.sender,
+    365.25 days,
+    IERC20(usdcAddress)
+);
+
+// Approve payment
+IERC20(usdcAddress).approve(address(registrar), base + premium);
+
+// Complete registration (must match commitment parameters)
+uint256 tokenId = registrar.register(
+    "vitalik",
+    msg.sender,
+    secret,
+    IRegistry(address(0)),
+    resolverAddress,
+    365.25 days,
+    IERC20(usdcAddress),
+    bytes32(0)
+);
+```
+
+</CodeGroup>
+
+<Note>
+All parameters in `register()` must exactly match those used in `makeCommitment()`, except `paymentToken` which is chosen at registration time.
+</Note>
+
+## Registration Requirements
+
+### Name Availability
+
+Check if a name is available before attempting registration:
+
+```solidity
+function isAvailable(string memory label) public view returns (bool)
+```
+
+```javascript ethers.js
+const available = await registrar.isAvailable('vitalik');
+if (!available) {
+  console.log('Name is already registered or reserved');
+}
+```
+
+### Validation
+
+The registration will fail if:
+
+<AccordionGroup>
+  <Accordion title="Name is not available">
+    ```solidity
+    error NameNotAvailable(string label);
+    ```
+    The name is already registered or reserved. Check availability with `isAvailable()`.
+  </Accordion>
+  
+  <Accordion title="Duration too short">
+    ```solidity
+    error DurationTooShort(uint64 duration, uint64 minDuration);
+    ```
+    Registration duration must be at least `MIN_REGISTER_DURATION` (typically 28 days).
+  </Accordion>
+  
+  <Accordion title="Commitment too new">
+    ```solidity
+    error CommitmentTooNew(bytes32 commitment, uint64 validFrom, uint64 blockTimestamp);
+    ```
+    You must wait at least `MIN_COMMITMENT_AGE` after committing.
+  </Accordion>
+  
+  <Accordion title="Commitment too old">
+    ```solidity
+    error CommitmentTooOld(bytes32 commitment, uint64 validTo, uint64 blockTimestamp);
+    ```
+    The commitment has expired. Submit a new commitment and try again.
+  </Accordion>
+  
+  <Accordion title="Invalid owner">
+    ```solidity
+    error InvalidOwner();
+    ```
+    Owner address cannot be `address(0)`.
+  </Accordion>
+</AccordionGroup>
+
+## Renewals
+
+Extend an existing registration before it expires:
+
+```solidity
+function renew(
+    string calldata label,
+    uint64 duration,
+    IERC20 paymentToken,
+    bytes32 referrer
+) external
+```
+
+<CodeGroup>
+
+```javascript ethers.js
+// Calculate renewal cost
+const state = await registry.getState(labelId);
+const renewalPrice = await registrar.rentPrice(
+  'vitalik',
+  state.latestOwner,
+  31557600, // 1 year
+  usdcAddress
+);
+
+// Approve payment (no premium for renewals)
+await usdc.approve(registrarAddress, renewalPrice.base);
+
+// Renew registration
+const tx = await registrar.renew(
+  'vitalik',
+  31557600,      // duration
+  usdcAddress,   // paymentToken
+  ethers.ZeroHash // referrer
+);
+await tx.wait();
+```
+
+```solidity Solidity
+// Get current state
+IPermissionedRegistry.State memory state = registry.getState(labelId);
+
+// Calculate renewal cost (no premium)
+(uint256 base, ) = registrar.rentPrice(
+    "vitalik",
+    state.latestOwner,
+    365.25 days,
+    IERC20(usdcAddress)
+);
+
+// Approve and renew
+IERC20(usdcAddress).approve(address(registrar), base);
+registrar.renew("vitalik", 365.25 days, IERC20(usdcAddress), bytes32(0));
+```
+
+</CodeGroup>
+
+<Info>
+Renewals do not require the commit-reveal process and can be called by anyone. The original owner pays no premium price when renewing.
+</Info>
+
+## Pricing
+
+Get the cost of registration or renewal:
+
+```solidity
+function rentPrice(
+    string memory label,
+    address owner,
+    uint64 duration,
+    IERC20 paymentToken
+) public view returns (uint256 base, uint256 premium)
+```
+
+### Price Components
+
+- **Base price**: Calculated based on name length and duration
+- **Premium price**: Applied to expired names to discourage squatting (decays over time)
+
+```javascript ethers.js
+const price = await registrar.rentPrice(
+  'vitalik',
+  ownerAddress,
+  31557600, // 1 year
+  usdcAddress
+);
+
+console.log(`Base: ${ethers.formatUnits(price.base, 6)} USDC`);
+console.log(`Premium: ${ethers.formatUnits(price.premium, 6)} USDC`);
+console.log(`Total: ${ethers.formatUnits(price.base + price.premium, 6)} USDC`);
+```
+
+<Note>
+Pass `address(0)` as the owner to exclude premium pricing for estimation purposes.
+</Note>
+
+## Payment Tokens
+
+Check if a token is accepted for payment:
+
+```solidity
+function isPaymentToken(IERC20 paymentToken) external view returns (bool)
+```
+
+```javascript ethers.js
+const acceptsUSDC = await registrar.isPaymentToken(usdcAddress);
+const acceptsDAI = await registrar.isPaymentToken(daiAddress);
+```
+
+## Name Validation
+
+Check if a label is valid for registration:
+
+```solidity
+function isValid(string calldata label) external view returns (bool)
+```
+
+```javascript ethers.js
+// Check if name meets minimum length requirements
+const valid = await registrar.isValid('ab'); // false - too short
+const valid2 = await registrar.isValid('abc'); // true - valid
+```
+
+## Granted Permissions
+
+When a name is registered, the owner automatically receives these permissions:
+
+```solidity
+uint256 constant REGISTRATION_ROLE_BITMAP = 0 |
+    RegistryRolesLib.ROLE_SET_SUBREGISTRY |
+    RegistryRolesLib.ROLE_SET_SUBREGISTRY_ADMIN |
+    RegistryRolesLib.ROLE_SET_RESOLVER |
+    RegistryRolesLib.ROLE_SET_RESOLVER_ADMIN |
+    RegistryRolesLib.ROLE_CAN_TRANSFER_ADMIN;
+```
+
+These permissions allow the owner to:
+
+- Configure and manage subregistries
+- Set and update the resolver
+- Transfer ownership of the name
+
+## Events
+
+### CommitmentMade
+
+```solidity
+event CommitmentMade(bytes32 commitment);
+```
+
+Emitted when a commitment is successfully recorded.
+
+### NameRegistered
+
+```solidity
+event NameRegistered(
+    uint256 indexed tokenId,
+    string label,
+    address owner,
+    IRegistry subregistry,
+    address resolver,
+    uint64 duration,
+    IERC20 paymentToken,
+    bytes32 referrer,
+    uint256 base,
+    uint256 premium
+);
+```
+
+Emitted when a name is successfully registered.
+
+### NameRenewed
+
+```solidity
+event NameRenewed(
+    uint256 indexed tokenId,
+    string label,
+    uint64 duration,
+    uint64 newExpiry,
+    IERC20 paymentToken,
+    bytes32 referrer,
+    uint256 base
+);
+```
+
+Emitted when a name is successfully renewed.
+
+## Administrative Functions
+
+### Update Price Oracle
+
+Only accounts with `ROLE_SET_ORACLE` can update the pricing oracle:
+
+```solidity
+function setRentPriceOracle(IRentPriceOracle oracle) external
+```
+
+## Security Considerations
+
+<Warning>
+**Front-running Protection**: Always use the commit-reveal process. Never reveal your intended registration parameters in the same transaction as the commitment.
+</Warning>
+
+<Tip>
+**Secret Generation**: Use a cryptographically secure random value for the secret. Never reuse secrets across different registrations.
+</Tip>
+
+<Info>
+**Payment Safety**: The contract uses OpenZeppelin's `SafeERC20` to handle token transfers safely, protecting against non-standard ERC-20 implementations.
+</Info>
+
+## Complete Registration Example
+
+Here's a complete example showing the full registration flow:
+
+```javascript ethers.js
+import { ethers } from 'ethers';
+
+async function registerName(registrar, registry, usdc, params) {
+  // Step 1: Check availability
+  const available = await registrar.isAvailable(params.label);
+  if (!available) {
+    throw new Error('Name is not available');
+  }
+
+  // Step 2: Generate secret and commitment
+  const secret = ethers.hexlify(ethers.randomBytes(32));
+  const commitment = await registrar.makeCommitment(
+    params.label,
+    params.owner,
+    secret,
+    params.subregistry,
+    params.resolver,
+    params.duration,
+    params.referrer || ethers.ZeroHash
+  );
+
+  // Step 3: Submit commitment
+  const commitTx = await registrar.commit(commitment);
+  await commitTx.wait();
+  console.log('Commitment submitted, waiting...');
+
+  // Step 4: Wait for MIN_COMMITMENT_AGE
+  const minAge = await registrar.MIN_COMMITMENT_AGE();
+  await new Promise(resolve => setTimeout(resolve, Number(minAge) * 1000 + 5000));
+
+  // Step 5: Calculate and approve payment
+  const price = await registrar.rentPrice(
+    params.label,
+    params.owner,
+    params.duration,
+    params.paymentToken
+  );
+  const totalCost = price.base + price.premium;
+  
+  const approveTx = await usdc.approve(await registrar.getAddress(), totalCost);
+  await approveTx.wait();
+  console.log(`Approved ${ethers.formatUnits(totalCost, 6)} USDC`);
+
+  // Step 6: Complete registration
+  const registerTx = await registrar.register(
+    params.label,
+    params.owner,
+    secret,
+    params.subregistry,
+    params.resolver,
+    params.duration,
+    params.paymentToken,
+    params.referrer || ethers.ZeroHash
+  );
+
+  const receipt = await registerTx.wait();
+  const event = receipt.logs.find(log => {
+    try {
+      return registrar.interface.parseLog(log)?.name === 'NameRegistered';
+    } catch { return false; }
+  });
+  
+  const tokenId = registrar.interface.parseLog(event).args.tokenId;
+  console.log(`Successfully registered ${params.label}.eth with tokenId: ${tokenId}`);
+  
+  return tokenId;
+}
+
+// Usage
+const tokenId = await registerName(registrar, registry, usdc, {
+  label: 'vitalik',
+  owner: await signer.getAddress(),
+  subregistry: ethers.ZeroAddress,
+  resolver: resolverAddress,
+  duration: 31557600, // 1 year
+  paymentToken: usdcAddress,
+  referrer: ethers.ZeroHash
+});
+```
+
+## Source Code
+
+<Card title="ETHRegistrar.sol" icon="github" href="https://github.com/ensdomains/contracts-v2/blob/main/contracts/src/registrar/ETHRegistrar.sol">
+  View the complete contract implementation
+</Card>

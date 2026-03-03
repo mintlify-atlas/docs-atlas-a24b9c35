@@ -1,0 +1,278 @@
+---
+title: Development Setup
+description: Set up your development environment for ENS v2 contracts
+---
+
+## Prerequisites
+
+Before you begin, ensure you have the following installed:
+
+<Steps>
+  <Step title="Install Node.js v24+">
+    Download and install from [nodejs.org](https://nodejs.org/)
+    
+    ```bash
+    node --version  # Should be v24 or higher
+    ```
+  </Step>
+
+  <Step title="Install Foundry v1.3.2+">
+    Follow the [official installation guide](https://book.getfoundry.sh/getting-started/installation)
+    
+    ```bash
+    curl -L https://foundry.paradigm.xyz | bash
+    foundryup
+    forge --version  # Should be v1.3.2 or higher
+    ```
+  </Step>
+
+  <Step title="Install Bun v1.2+">
+    Install from [bun.sh](https://bun.sh/)
+    
+    ```bash
+    curl -fsSL https://bun.sh/install | bash
+    bun --version  # Should be v1.2 or higher
+    ```
+  </Step>
+
+  <Step title="(Optional) Install lcov for coverage">
+    Required only if you plan to run test coverage reports.
+    
+    <CodeGroup>
+    ```bash macOS
+    brew install lcov
+    ```
+    
+    ```bash Ubuntu/Debian
+    sudo apt-get install lcov
+    ```
+    </CodeGroup>
+  </Step>
+</Steps>
+
+## Installation
+
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/ensdomains/contracts-v2.git
+    cd contracts-v2
+    ```
+  </Step>
+
+  <Step title="Install root dependencies">
+    ```bash
+    bun i
+    ```
+  </Step>
+
+  <Step title="Install Forge dependencies">
+    ```bash
+    cd contracts
+    forge i
+    ```
+  </Step>
+
+  <Step title="Compile ens-contracts library">
+    This is required before running tests.
+    
+    ```bash
+    cd lib/ens-contracts
+    bun run compile
+    cd ../..
+    ```
+  </Step>
+</Steps>
+
+## Build
+
+ENS v2 uses both Foundry and Hardhat for compilation:
+
+<CodeGroup>
+```bash All
+bun run compile
+```
+
+```bash Forge only
+forge build
+```
+
+```bash Hardhat only
+bun run compile:hardhat
+```
+</CodeGroup>
+
+### Build Configuration
+
+#### Foundry (foundry.toml)
+
+```toml
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+gas_reports = ["*"]
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 200
+
+[fuzz]
+runs = 4096
+```
+
+#### Hardhat (hardhat.config.ts)
+
+```typescript
+solidity: {
+  compilers: [
+    {
+      version: "0.8.25",
+      settings: {
+        optimizer: {
+          enabled: true,
+          runs: 1000,
+        },
+        evmVersion: "cancun",
+      },
+    },
+  ],
+}
+```
+
+<Warning>
+  Do not use `--via-ir` when compiling contracts. If you encounter "stack too deep" errors, fix them through code refactoring instead.
+</Warning>
+
+## Project Structure
+
+```
+contracts/
+├── src/                      # Smart contract source files
+│   ├── registry/            # Registry contracts
+│   ├── erc1155/            # ERC1155 implementation
+│   ├── migration/          # Migration controllers
+│   ├── universalResolver/  # Resolution contracts
+│   └── access/             # Access control
+├── test/                    # Test files
+│   ├── integration/        # Hardhat integration tests
+│   ├── e2e/               # End-to-end tests
+│   └── *.t.sol            # Forge unit tests
+├── deploy/                 # Deployment scripts
+├── script/                 # Utility scripts
+├── lib/                    # External dependencies
+│   └── ens-contracts/     # ENS v1 contracts
+├── foundry.toml           # Foundry configuration
+├── hardhat.config.ts      # Hardhat configuration
+└── package.json           # Node.js dependencies
+```
+
+## Development Tools
+
+Foundry provides additional tools for development:
+
+### Format Code
+
+```bash
+forge fmt
+```
+
+### Lint Solidity Code
+
+```bash
+bun run lint
+```
+
+### Gas Snapshots
+
+Generate gas usage snapshots for all tests:
+
+```bash
+forge snapshot
+```
+
+### Cast (CLI Tool)
+
+Cast is a command-line tool for interacting with Ethereum:
+
+```bash
+# Get block number
+cast block-number
+
+# Call a contract
+cast call <CONTRACT_ADDRESS> "symbol()" --rpc-url http://localhost:8545
+
+# Send a transaction
+cast send <CONTRACT_ADDRESS> "mint(address,uint256)" <ADDRESS> 100 --rpc-url http://localhost:8545
+```
+
+See the [Cast documentation](https://book.getfoundry.sh/reference/cast/) for more commands.
+
+### Anvil (Local Node)
+
+Anvil is a local Ethereum node for testing:
+
+```bash
+# Start Anvil on default port (8545)
+anvil
+
+# Start with custom chain ID
+anvil --chain-id 31337
+
+# Fork mainnet
+anvil --fork-url https://eth-mainnet.alchemyapi.io/v2/YOUR_KEY
+```
+
+### Chisel (Solidity REPL)
+
+Chisel is an interactive Solidity shell:
+
+```bash
+chisel
+```
+
+## Common Issues
+
+### Stack Too Deep Errors
+
+If you encounter "stack too deep" errors during compilation, refactor your code instead of using `--via-ir`. Common solutions:
+
+- Extract logic into separate internal functions
+- Use structs to group related parameters
+- Reduce the number of local variables
+
+### Compilation Errors in ens-contracts
+
+If you see errors related to `lib/ens-contracts`, ensure you've compiled it:
+
+```bash
+cd lib/ens-contracts
+bun run compile
+```
+
+### Missing Dependencies
+
+If Forge can't find dependencies, reinstall them:
+
+```bash
+forge install
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Testing" icon="flask" href="/development/testing">
+    Learn how to run and write tests
+  </Card>
+  
+  <Card title="Local Devnet" icon="server" href="/development/devnet">
+    Set up a local development network
+  </Card>
+  
+  <Card title="Deployment" icon="rocket" href="/development/deployment">
+    Deploy contracts to testnets and mainnet
+  </Card>
+  
+  <Card title="Contract Architecture" icon="diagram-project" href="/concepts/architecture">
+    Understand the ENS v2 architecture
+  </Card>
+</CardGroup>

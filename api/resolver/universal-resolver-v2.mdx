@@ -1,0 +1,206 @@
+---
+title: 'UniversalResolverV2'
+description: 'Universal resolver contract for ENS v2 that finds and uses resolvers across the registry hierarchy'
+---
+
+## Overview
+
+The `UniversalResolverV2` contract extends the ENS Universal Resolver functionality to support the ENS v2 multi-registry architecture. It provides methods to find resolvers, registries, and canonical names across the hierarchical registry structure.
+
+**Contract Address**: Deploy-specific (immutable ROOT_REGISTRY)
+
+**Inherits**: `AbstractUniversalResolver`
+
+## Constructor
+
+```solidity
+constructor(
+    IRegistry root,
+    IGatewayProvider batchGatewayProvider
+)
+```
+
+Initializes the UniversalResolverV2 with a root registry and gateway provider.
+
+<ParamField path="root" type="IRegistry" required>
+  The root registry contract that anchors the registry hierarchy
+</ParamField>
+
+<ParamField path="batchGatewayProvider" type="IGatewayProvider" required>
+  Gateway provider for batch CCIP-Read operations
+</ParamField>
+
+## Read Functions
+
+### findCanonicalName
+
+```solidity
+function findCanonicalName(IRegistry registry) external view returns (bytes memory)
+```
+
+Constructs the canonical DNS-encoded name for a given registry by traversing up the registry hierarchy.
+
+<ParamField path="registry" type="IRegistry" required>
+  The registry contract to construct a name for
+</ParamField>
+
+<ResponseField name="return" type="bytes">
+  The DNS-encoded canonical name, or empty bytes if the registry is not canonical
+</ResponseField>
+
+**Example**:
+```solidity
+// Get canonical name for a registry
+IRegistry ethRegistry = rootRegistry.getSubregistry("eth");
+bytes memory name = resolver.findCanonicalName(ethRegistry);
+// Returns DNS-encoded "eth" (0x03657468 + 0x00)
+```
+
+### findCanonicalRegistry
+
+```solidity
+function findCanonicalRegistry(bytes calldata name) external view returns (IRegistry)
+```
+
+Finds the canonical registry for a DNS-encoded name. Returns the registry only if it is the canonical registry for that exact name.
+
+<ParamField path="name" type="bytes" required>
+  The DNS-encoded name to look up (e.g., "vitalik.eth" as DNS-encoded bytes)
+</ParamField>
+
+<ResponseField name="return" type="IRegistry">
+  The canonical registry contract, or null (address(0)) if not found or not canonical
+</ResponseField>
+
+**Example**:
+```solidity
+// Find the canonical registry for "eth"
+bytes memory ethName = hex"036574680000"; // DNS-encoded "eth"
+IRegistry ethRegistry = resolver.findCanonicalRegistry(ethName);
+
+if (address(ethRegistry) != address(0)) {
+    // Registry found and is canonical
+}
+```
+
+### findRegistries
+
+```solidity
+function findRegistries(bytes calldata name) external view returns (IRegistry[] memory)
+```
+
+Finds all registries in the ancestry of a name, from most specific to root.
+
+<ParamField path="name" type="bytes" required>
+  The DNS-encoded name to traverse
+</ParamField>
+
+<ResponseField name="return" type="IRegistry[]">
+  Array of registries in label-order, from the name to the root. Null entries indicate missing registries.
+</ResponseField>
+
+**Behavior Examples**:
+- `findRegistries("")` returns `[<root>]`
+- `findRegistries("eth")` returns `[<eth>, <root>]`
+- `findRegistries("vitalik.eth")` returns `[<vitalik>, <eth>, <root>]`
+- `findRegistries("sub.vitalik.eth")` returns `[null, <vitalik>, <eth>, <root>]` if "sub" doesn't exist
+
+**Example**:
+```solidity
+// Get all registries for a name
+bytes memory name = dnsEncode("vitalik.eth");
+IRegistry[] memory registries = resolver.findRegistries(name);
+
+for (uint i = 0; i < registries.length; i++) {
+    if (address(registries[i]) != address(0)) {
+        // Process each registry in the hierarchy
+    }
+}
+```
+
+### findResolver
+
+```solidity
+function findResolver(
+    bytes memory name
+) public view returns (
+    address resolver,
+    bytes32 node,
+    uint256 offset
+)
+```
+
+Finds the resolver address for a given name by traversing the registry hierarchy.
+
+<ParamField path="name" type="bytes" required>
+  The DNS-encoded name to resolve
+</ParamField>
+
+<ResponseField name="resolver" type="address">
+  The resolver contract address, or address(0) if not found
+</ResponseField>
+
+<ResponseField name="node" type="bytes32">
+  The namehash of the name
+</ResponseField>
+
+<ResponseField name="offset" type="uint256">
+  The offset into the name where the resolver was found
+</ResponseField>
+
+**Example**:
+```solidity
+// Find resolver for a name
+bytes memory name = dnsEncode("vitalik.eth");
+(address resolverAddr, bytes32 node, uint256 offset) = universalResolver.findResolver(name);
+
+if (resolverAddr != address(0)) {
+    // Use the resolver
+    IResolver resolver = IResolver(resolverAddr);
+    address ethAddr = resolver.addr(node);
+}
+```
+
+## Public State Variables
+
+### ROOT_REGISTRY
+
+```solidity
+IRegistry public immutable ROOT_REGISTRY
+```
+
+The root registry that anchors the entire ENS v2 registry hierarchy. This is set during contract construction and cannot be changed.
+
+## Integration Example
+
+```solidity
+// Complete workflow: resolve a name to an Ethereum address
+contract ENSClient {
+    UniversalResolverV2 public universalResolver;
+    
+    function resolveAddress(string memory ensName) public view returns (address) {
+        // 1. DNS-encode the name
+        bytes memory dnsName = dnsEncode(ensName);
+        
+        // 2. Find the resolver
+        (address resolverAddr, bytes32 node,) = universalResolver.findResolver(dnsName);
+        require(resolverAddr != address(0), "No resolver found");
+        
+        // 3. Query the resolver for the address
+        IAddrResolver resolver = IAddrResolver(resolverAddr);
+        return resolver.addr(node);
+    }
+    
+    function dnsEncode(string memory name) internal pure returns (bytes memory) {
+        // DNS encoding implementation
+        // e.g., "vitalik.eth" -> 0x0776697461 6c696b036574680000
+    }
+}
+```
+
+## Related Contracts
+
+- **IRegistry**: Registry interface for ENS v2 hierarchical registries
+- **AbstractUniversalResolver**: Base universal resolver implementation
+- **LibRegistry**: Library providing registry traversal utilities
+- **IGatewayProvider**: Gateway provider for CCIP-Read operations

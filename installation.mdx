@@ -1,0 +1,559 @@
+---
+title: Installation
+description: Set up your development environment for ENS v2 Contracts
+---
+
+# Installation
+
+This guide covers everything you need to set up your development environment for working with ENS v2 contracts.
+
+## System Requirements
+
+<CardGroup cols={3}>
+  <Card title="Node.js" icon="node-js">
+    Version 24 or higher
+  </Card>
+  <Card title="Foundry" icon="hammer">
+    Version 1.3.2 or higher
+  </Card>
+  <Card title="Bun" icon="rabbit-running">
+    Version 1.2 or higher
+  </Card>
+</CardGroup>
+
+## Install Prerequisites
+
+<Steps>
+  <Step title="Install Node.js">
+    Install Node.js v24 or higher:
+
+    <CodeGroup>
+    ```bash macOS (Homebrew)
+    brew install node@24
+    ```
+
+    ```bash Linux (nvm)
+    curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.0/install.sh | bash
+    nvm install 24
+    nvm use 24
+    ```
+
+    ```bash Windows (nvm-windows)
+    # Download and install from https://github.com/coreybutler/nvm-windows
+    nvm install 24
+    nvm use 24
+    ```
+    </CodeGroup>
+
+    Verify installation:
+    ```bash
+    node --version
+    # Should output v24.x.x or higher
+    ```
+  </Step>
+
+  <Step title="Install Foundry">
+    Foundry is a blazing fast Ethereum development toolkit written in Rust.
+
+    <CodeGroup>
+    ```bash macOS/Linux
+    curl -L https://foundry.paradigm.xyz | bash
+    foundryup
+    ```
+
+    ```bash Windows (WSL)
+    # Run in Windows Subsystem for Linux
+    curl -L https://foundry.paradigm.xyz | bash
+    foundryup
+    ```
+    </CodeGroup>
+
+    Verify installation:
+    ```bash
+    forge --version
+    # Should output forge 1.3.2 or higher
+    ```
+
+    <Info>
+    For detailed installation instructions, see the [Foundry Book](https://book.getfoundry.sh/getting-started/installation).
+    </Info>
+  </Step>
+
+  <Step title="Install Bun">
+    Bun is a fast JavaScript runtime and package manager.
+
+    <CodeGroup>
+    ```bash macOS/Linux
+    curl -fsSL https://bun.sh/install | bash
+    ```
+
+    ```bash macOS (Homebrew)
+    brew install oven-sh/bun/bun
+    ```
+
+    ```bash Windows (PowerShell)
+    powershell -c "irm bun.sh/install.ps1 | iex"
+    ```
+    </CodeGroup>
+
+    Verify installation:
+    ```bash
+    bun --version
+    # Should output 1.2.x or higher
+    ```
+  </Step>
+
+  <Step title="Install lcov (Optional)">
+    Required only if you want to run coverage tests.
+
+    <CodeGroup>
+    ```bash macOS
+    brew install lcov
+    ```
+
+    ```bash Ubuntu/Debian
+    sudo apt-get install lcov
+    ```
+
+    ```bash Fedora/RHEL
+    sudo dnf install lcov
+    ```
+    </CodeGroup>
+  </Step>
+</Steps>
+
+## Clone and Setup
+
+<Steps>
+  <Step title="Clone the Repository">
+    ```bash
+    git clone https://github.com/ensdomains/contracts-v2.git
+    cd contracts-v2
+    ```
+  </Step>
+
+  <Step title="Install Dependencies">
+    Navigate to the contracts directory and install dependencies:
+
+    ```bash
+    cd contracts
+    bun i
+    forge i
+    ```
+
+    This installs:
+    - JavaScript dependencies via Bun
+    - Solidity dependencies via Forge
+  </Step>
+
+  <Step title="Build Contracts">
+    Compile both Foundry and Hardhat contracts:
+
+    ```bash
+    forge build
+    bun run compile:hardhat
+    ```
+
+    <Tip>
+    You can also use `bun run compile` to build both at once.
+    </Tip>
+  </Step>
+</Steps>
+
+## Project Structure
+
+After installation, your project structure will look like this:
+
+```
+contracts/
+├── src/                          # Solidity source files
+│   ├── registry/                 # Registry contracts
+│   │   ├── PermissionedRegistry.sol
+│   │   ├── UserRegistry.sol
+│   │   └── libraries/
+│   ├── registrar/                # Registrar contracts
+│   │   └── ETHRegistrar.sol
+│   ├── resolver/                 # Resolver contracts
+│   │   └── PermissionedResolver.sol
+│   ├── universalResolver/        # Universal resolver
+│   │   └── UniversalResolverV2.sol
+│   ├── migration/                # ENS v1 migration
+│   ├── access-control/           # Access control system
+│   │   └── EnhancedAccessControl.sol
+│   ├── erc1155/                  # ERC1155 singleton
+│   └── dns/                      # DNS integration
+├── test/                         # Test files
+│   ├── unit/                     # Unit tests (Foundry)
+│   └── e2e/                      # End-to-end tests (Hardhat)
+├── deploy/                       # Deployment scripts
+├── lib/                          # Forge dependencies
+├── foundry.toml                  # Foundry configuration
+├── hardhat.config.ts             # Hardhat configuration
+└── package.json                  # Node.js dependencies
+```
+
+## Configuration
+
+### Foundry Configuration
+
+The project uses these Foundry settings (from `foundry.toml`):
+
+```toml
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+gas_reports = ["*"]
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 200
+
+[fuzz]
+runs = 4096
+```
+
+### Environment Variables
+
+Create a `.env` file in the contracts directory for custom configuration:
+
+```bash
+# Optional: Custom RPC URLs
+ETH_RPC_URL=https://eth-mainnet.alchemyapi.io/v2/YOUR-API-KEY
+
+# Optional: Etherscan API key for verification
+ETHERSCAN_API_KEY=your-etherscan-api-key
+
+# Optional: Private key for deployment (testnet/mainnet)
+PRIVATE_KEY=0x...
+```
+
+<Warning>
+Never commit your `.env` file or expose private keys. The repository's `.gitignore` excludes `.env` by default.
+</Warning>
+
+## Running Tests
+
+Verify your installation by running the test suite:
+
+<Tabs>
+  <Tab title="All Tests">
+    Run the complete test suite:
+
+    ```bash
+    bun run test
+    ```
+
+    This runs both Foundry and Hardhat tests.
+  </Tab>
+
+  <Tab title="Foundry Tests">
+    Run only Foundry (Solidity) tests:
+
+    ```bash
+    bun run test:forge
+    # or
+    forge test
+    ```
+
+    With verbosity:
+    ```bash
+    forge test -vvv
+    ```
+  </Tab>
+
+  <Tab title="Hardhat Tests">
+    Run only Hardhat (TypeScript) tests:
+
+    ```bash
+    bun run test:hardhat
+    ```
+  </Tab>
+
+  <Tab title="E2E Tests">
+    Run end-to-end tests:
+
+    ```bash
+    bun run test:e2e
+    ```
+  </Tab>
+</Tabs>
+
+### Before Running Tests
+
+<Note>
+Before running tests, compile the ENS v1 contracts dependency:
+
+```bash
+cd lib/ens-contracts
+bun run compile
+cd ../..
+```
+
+This only needs to be done once after initial setup.
+</Note>
+
+## Development Workflow
+
+### Start Local Devnet
+
+The easiest way to develop is using the local devnet:
+
+<Tabs>
+  <Tab title="Native Devnet">
+    Recommended approach:
+
+    ```bash
+    bun run devnet
+    ```
+
+    This starts a local chain at:
+    - **URL**: `http://localhost:8545`
+    - **Chain ID**: `31337`
+
+    The devnet includes:
+    - All ENS v2 contracts deployed
+    - Pre-configured test accounts with ETH
+    - ETH Registry with .eth TLD
+    - Universal Resolver
+    - Mock ERC20 tokens for testing
+  </Tab>
+
+  <Tab title="Docker Devnet">
+    Alternative using Docker:
+
+    ```bash
+    # Build and start
+    docker compose up -d
+
+    # Or use pre-built image
+    docker pull ghcr.io/ensdomains/contracts-v2:latest
+    docker compose up -d
+    ```
+
+    View logs:
+    ```bash
+    docker logs -f contracts-v2-devnet-1
+    ```
+
+    Stop devnet:
+    ```bash
+    docker compose down
+    ```
+  </Tab>
+</Tabs>
+
+### Code Formatting
+
+Format Solidity code:
+
+```bash
+forge fmt
+```
+
+### Linting
+
+Run Solidity linter:
+
+```bash
+bun run lint
+```
+
+### Gas Snapshots
+
+Generate gas usage snapshots:
+
+```bash
+forge snapshot
+```
+
+### Coverage Reports
+
+Generate test coverage reports:
+
+```bash
+bun run coverage
+```
+
+This generates:
+- Foundry coverage (`coverage/forge.lcov`)
+- Hardhat coverage (`coverage/hardhat.lcov`)
+- Combined HTML reports
+
+## IDE Setup
+
+### Visual Studio Code
+
+Recommended extensions:
+
+1. **Solidity** by Juan Blanco
+2. **Hardhat Solidity** by Nomic Foundation
+3. **Prettier - Code formatter**
+
+### VSCode Settings
+
+Add to `.vscode/settings.json`:
+
+```json
+{
+  "solidity.compileUsingRemoteVersion": "v0.8.25",
+  "solidity.formatter": "forge",
+  "editor.formatOnSave": true,
+  "[solidity]": {
+    "editor.defaultFormatter": "JuanBlanco.solidity"
+  }
+}
+```
+
+### Vim/Neovim
+
+Install Solidity syntax highlighting:
+
+```vim
+Plug 'tomlion/vim-solidity'
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Compilation Errors">
+    If you encounter compilation errors:
+
+    1. Clean build artifacts:
+       ```bash
+       forge clean
+       bun run clean
+       ```
+
+    2. Reinstall dependencies:
+       ```bash
+       rm -rf node_modules lib
+       bun i
+       forge i
+       ```
+
+    3. Rebuild:
+       ```bash
+       forge build
+       bun run compile:hardhat
+       ```
+  </Accordion>
+
+  <Accordion title="Test Failures">
+    If tests fail:
+
+    1. Ensure ENS v1 contracts are compiled:
+       ```bash
+       cd lib/ens-contracts
+       bun run compile
+       cd ../..
+       ```
+
+    2. Run tests with verbose output:
+       ```bash
+       forge test -vvv
+       ```
+
+    3. Run specific test:
+       ```bash
+       forge test --match-test testFunctionName -vvv
+       ```
+  </Accordion>
+
+  <Accordion title="Devnet Won't Start">
+    If the devnet fails to start:
+
+    1. Check if port 8545 is in use:
+       ```bash
+       lsof -i :8545
+       ```
+
+    2. Kill any existing processes:
+       ```bash
+       kill -9 $(lsof -t -i:8545)
+       ```
+
+    3. Try restarting:
+       ```bash
+       bun run devnet
+       ```
+  </Accordion>
+
+  <Accordion title="Out of Memory Errors">
+    If you encounter out of memory errors during compilation:
+
+    1. The project is configured to NOT use `--via-ir` to avoid stack too deep errors
+    2. If you modify contracts and hit stack too deep, refactor the code instead of enabling `--via-ir`
+    3. Increase Node.js memory limit:
+       ```bash
+       export NODE_OPTIONS="--max-old-space-size=8192"
+       ```
+  </Accordion>
+</AccordionGroup>
+
+## Additional Tools
+
+Foundry provides additional useful tools:
+
+### Cast
+
+Command-line tool for Ethereum RPC calls:
+
+```bash
+# Get block number
+cast block-number
+
+# Call a contract
+cast call <address> "balanceOf(address)" <address>
+
+# Send a transaction
+cast send <address> "transfer(address,uint256)" <to> <amount> --private-key <key>
+```
+
+### Anvil
+
+Local Ethereum node (used by devnet):
+
+```bash
+# Start Anvil directly
+anvil
+
+# With specific options
+anvil --port 8545 --chain-id 31337
+```
+
+### Chisel
+
+Solidity REPL for testing snippets:
+
+```bash
+chisel
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Deploy and interact with contracts
+  </Card>
+  <Card title="Core Concepts" icon="book" href="/concepts/architecture">
+    Learn the architecture
+  </Card>
+  <Card title="Testing Guide" icon="vial" href="/development/testing">
+    Write and run tests
+  </Card>
+  <Card title="Deployment" icon="cloud" href="/development/deployment">
+    Deploy to testnet or mainnet
+  </Card>
+</CardGroup>
+
+## Getting Help
+
+If you run into issues:
+
+- **GitHub Issues**: [Report bugs or request features](https://github.com/ensdomains/contracts-v2/issues)
+- **ENS Discord**: Join the ENS community
+- **Documentation**: Read the [ENS v2 design doc](http://go.ens.xyz/ensv2)
+
+<Tip>
+For the latest updates and best practices, check the repository's README and CONTRIBUTING guidelines.
+</Tip>

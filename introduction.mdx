@@ -1,0 +1,214 @@
+---
+title: Introduction to ENS v2 Contracts
+description: Next-generation Ethereum Name Service with hierarchical registries and advanced access control
+---
+
+# Welcome to ENS v2 Contracts
+
+ENS v2 is a next-generation naming system for Ethereum designed for scalability, flexibility, and cross-chain functionality. It transitions from a flat registry to a hierarchical system that enables custom ownership models while maintaining backward compatibility with ENS v1.
+
+## What is ENS v2?
+
+ENS v2 is a complete redesign of the Ethereum Name Service that introduces a hierarchical registry architecture where each name can have its own registry contract managing its subdomains. This enables unprecedented flexibility in ownership models, access control, and gas efficiency.
+
+<CardGroup cols={2}>
+  <Card title="Hierarchical Registries" icon="sitemap">
+    Each name manages its own subdomains through dedicated registry contracts, enabling custom ownership models per level.
+  </Card>
+  <Card title="Role-Based Access" icon="shield-halved">
+    32 resource-scoped roles with paired admin roles for fine-grained permission management.
+  </Card>
+  <Card title="Canonical ID System" icon="fingerprint">
+    Mutable token IDs with internal canonical IDs enable secure role management and marketplace protection.
+  </Card>
+  <Card title="Universal Resolution" icon="magnifying-glass">
+    Single resolver entry point with wildcard resolution, batch queries, and CCIP-Read support.
+  </Card>
+</CardGroup>
+
+## Key Features
+
+### Hierarchical Registry System
+
+ENS v2 uses a tree of registries where each registry is responsible for one name and its direct subdomains:
+
+```
+Root Registry → TLD Registries (.eth, .box) → Domain Registries (example.eth) → Subdomain Registries (sub.example.eth)
+```
+
+Each registry implements ERC1155, treating subdomains as NFTs, and stores data in the singleton `RegistryDatastore` for efficient storage access.
+
+### Role-Based Access Control with 32 Roles
+
+ENS v2 uses **EnhancedAccessControl (EAC)**, a gas-efficient access control system with two key features:
+
+- **Resource-scoped permissions**: Roles are assigned to specific resources (individual names) rather than contract-wide
+- **Paired admin roles**: Each base role has exactly one corresponding admin role
+
+<CodeGroup>
+```solidity Registry Roles
+// From RegistryRolesLib.sol
+ROLE_REGISTRAR          // Can register new names (root-only)
+ROLE_RENEW              // Can renew name registrations
+ROLE_SET_SUBREGISTRY    // Can change subregistry addresses
+ROLE_SET_RESOLVER       // Can change the resolver address
+ROLE_CAN_TRANSFER_ADMIN // Auto-granted to owner, revoking creates soulbound NFT
+```
+
+```solidity Granting Roles
+// Grant resolver permissions for a specific name
+registry.grantRoles(
+    tokenId,
+    RegistryRolesLib.ROLE_SET_RESOLVER,
+    resolverManager
+);
+
+// Grant multiple roles at once
+uint256 operatorRoles = RegistryRolesLib.ROLE_SET_RESOLVER |
+                        RegistryRolesLib.ROLE_SET_SUBREGISTRY;
+registry.grantRoles(tokenId, operatorRoles, operator);
+```
+</CodeGroup>
+
+### Canonical ID System for Mutable Token IDs
+
+Token IDs are regenerated when:
+- An expired name is re-registered (resets roles for new owner)
+- Roles on a name are changed (prevents NFT marketplace griefing)
+
+The system uses a **canonical ID** as the internal representation:
+
+```solidity
+canonicalId = tokenId ^ uint32(tokenId)
+```
+
+This canonical ID is used internally for:
+- Checking role-based permissions
+- Reading/writing storage data (expiry, registry, resolver)
+
+### Universal Resolver with Wildcard Resolution
+
+The `UniversalResolverV2` provides a single entry point for all name resolution:
+
+```solidity
+// Resolve any ENS name
+(bytes memory result, address resolver) = universalResolver.resolve(
+    dnsEncodedName,
+    abi.encodeWithSelector(IAddrResolver.addr.selector, node)
+);
+address resolved = abi.decode(result, (address));
+```
+
+Features:
+- Recursive registry traversal
+- Wildcard resolution (parent resolver handles subdomains)
+- Batch resolution for multiple names
+- CCIP-Read support for off-chain resolution
+
+### ENSv1 to ENSv2 Migration Framework
+
+Seamless migration path from ENS v1 with two controllers:
+
+<Info>
+**LockedMigrationController** handles ENS v1 locked names (from NameWrapper)
+
+**UnlockedMigrationController** handles ENS v1 unlocked names (from BaseRegistrar)
+</Info>
+
+Unmigrated ENS v1 names continue to function normally, ensuring backward compatibility.
+
+### Gas-Optimized ERC1155 Singleton
+
+`ERC1155Singleton` is a modified ERC1155 allowing only one token per ID:
+
+- Saves gas by omitting balance tracking
+- Provides `ownerOf(uint256 id)` like ERC721
+- Emits transfer events for indexing
+- All registries share singleton storage pattern
+
+### DNS Integration with DNSSEC Support
+
+ENS v2 includes comprehensive DNS support:
+
+- `DNSTLDResolver` for DNS TLD resolution with DNSSEC verification
+- `DNSTXTResolver` for reading TXT records
+- `DNSAliasResolver` for DNS aliasing
+- Full DNSSEC validation chain
+
+## Architecture Overview
+
+### Resolution Process
+
+1. Start at root registry
+2. Recursively traverse to find the deepest registry with a resolver set
+3. Query that resolver for the requested record
+4. Support wildcard resolution (parent resolver handles subdomains)
+
+### Storage Structure
+
+All registries store data in the singleton `RegistryDatastore`:
+
+```solidity
+struct Entry {
+    uint64 expiry;           // Timestamp when name expires (0 = never)
+    uint32 tokenVersionId;   // Version counter for token regeneration
+    address subregistry;     // Registry contract for subdomains
+    uint32 eacVersionId;     // Version counter for access control changes
+    address resolver;        // Resolver contract for name resolution
+}
+```
+
+## Get Started
+
+<CardGroup cols={3}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Get up and running with ENS v2 in minutes
+  </Card>
+  <Card title="Installation" icon="download" href="/installation">
+    Set up your development environment
+  </Card>
+  <Card title="Core Concepts" icon="book" href="/concepts/architecture">
+    Understand the architecture and design
+  </Card>
+</CardGroup>
+
+## Resources
+
+<CardGroup cols={2}>
+  <Card title="GitHub Repository" icon="github" href="https://github.com/ensdomains/contracts-v2">
+    View the source code and contribute
+  </Card>
+  <Card title="ENSv2 Design Doc" icon="file-lines" href="http://go.ens.xyz/ensv2">
+    Read the comprehensive architectural design
+  </Card>
+</CardGroup>
+
+## Contract Interfaces
+
+Key contracts and their roles:
+
+| Contract | Purpose |
+|----------|--------|
+| `PermissionedRegistry` | Feature-complete registry with role-based access control |
+| `UniversalResolverV2` | Single entry point for all name resolution |
+| `ETHRegistrar` | Handles .eth name registration with pricing and commitments |
+| `PermissionedResolver` | Resolver with fine-grained permissions and aliasing |
+| `RegistryDatastore` | Universal storage contract for all registries |
+| `ERC1155Singleton` | Gas-optimized NFT implementation for subdomains |
+
+## Next Steps
+
+<Steps>
+  <Step title="Install Dependencies">
+    Set up Node.js, Foundry, and Bun for development
+  </Step>
+  <Step title="Deploy Locally">
+    Start the devnet and deploy contracts
+  </Step>
+  <Step title="Register a Name">
+    Learn the registration flow with commitments
+  </Step>
+  <Step title="Resolve Names">
+    Use the Universal Resolver to query name data
+  </Step>
+</Steps>

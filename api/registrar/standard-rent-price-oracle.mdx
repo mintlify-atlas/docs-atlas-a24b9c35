@@ -1,0 +1,839 @@
+---
+title: 'StandardRentPriceOracle'
+description: 'Pricing oracle for ENS name registrations and renewals'
+---
+
+## Overview
+
+The `StandardRentPriceOracle` contract calculates registration and renewal prices for ENS names. It implements a sophisticated pricing model with:
+
+- Variable base rates by name length (codepoints)
+- Duration-based discounts for longer registrations
+- Premium pricing for recently expired names (exponential decay)
+- Multi-token payment support with configurable exchange rates
+
+**Interface ID**: `0x53b53cee`
+
+## Key Features
+
+- Length-based pricing (shorter names cost more)
+- Discount incentives for multi-year registrations
+- Premium pricing that decays exponentially after expiration
+- Support for multiple ERC-20 payment tokens
+- Owner-controlled pricing configuration
+
+## Constants
+
+### REGISTRY
+
+```solidity
+IPermissionedRegistry public immutable REGISTRY
+```
+
+The ENS registry contract used to check name expiry status.
+
+## State Variables
+
+### premiumPriceInitial
+
+```solidity
+uint256 public premiumPriceInitial
+```
+
+The initial premium price for a name immediately after expiration, in base units.
+
+### premiumHalvingPeriod
+
+```solidity
+uint64 public premiumHalvingPeriod
+```
+
+Duration (in seconds) for the premium price to decay by half.
+
+### premiumPeriod
+
+```solidity
+uint64 public premiumPeriod
+```
+
+Total duration (in seconds) of the premium pricing period. Premium becomes zero after this time.
+
+## Data Structures
+
+### DiscountPoint
+
+```solidity
+struct DiscountPoint {
+    uint64 t;      // Incremental time interval, in seconds
+    uint128 value; // Discount percentage relative to type(uint128).max
+}
+```
+
+Defines a point in the discount function. The discount is applied incrementally based on registration duration.
+
+<ParamField path="t" type="uint64">
+  The time interval for this discount tier, in seconds
+</ParamField>
+
+<ParamField path="value" type="uint128">
+  The discount percentage for this tier, where `type(uint128).max` represents 100%
+</ParamField>
+
+### PaymentRatio
+
+```solidity
+struct PaymentRatio {
+    IERC20 token;   // The payment token address
+    uint128 numer;  // Exchange rate numerator
+    uint128 denom;  // Exchange rate denominator
+}
+```
+
+Configures a payment token with its exchange rate to base units.
+
+<ParamField path="token" type="IERC20">
+  The ERC-20 token contract address
+</ParamField>
+
+<ParamField path="numer" type="uint128">
+  Exchange rate numerator
+</ParamField>
+
+<ParamField path="denom" type="uint128">
+  Exchange rate denominator. Price in tokens = (base price * numer) / denom
+</ParamField>
+
+## Functions
+
+### updateBaseRates
+
+```solidity
+function updateBaseRates(uint256[] calldata ratePerCp) external onlyOwner
+```
+
+Update the base registration rates per codepoint.
+
+<ParamField path="ratePerCp" type="uint256[]" required>
+  Array of base rates in base units per second. `ratePerCp[i]` is the rate for `i+1` codepoints. Names longer than the array length use the last rate. Set rate to 0 to disable a specific length. Use empty array to disable all registrations.
+</ParamField>
+
+**Events Emitted**:
+- `BaseRatesChanged(uint256[] ratePerCp)`
+
+**Access Control**: Only callable by contract owner.
+
+**Example**:
+
+```solidity
+// Set rates for 1-5 character names
+// 1 char: 1000 wei/sec, 2 char: 500 wei/sec, 3+ char: 100 wei/sec
+uint256[] memory rates = new uint256[](3);
+rates[0] = 1000; // 1 character
+rates[1] = 500;  // 2 characters  
+rates[2] = 100;  // 3+ characters
+
+oracle.updateBaseRates(rates);
+```
+
+### updateDiscountPoints
+
+```solidity
+function updateDiscountPoints(DiscountPoint[] calldata points) external onlyOwner
+```
+
+Update the discount function for longer registration durations.
+
+<ParamField path="points" type="DiscountPoint[]" required>
+  Array of discount points defining the discount tiers. Each point specifies an incremental time interval and its corresponding discount percentage. Use empty array to disable discounts.
+</ParamField>
+
+**Events Emitted**:
+- `DiscountPointsChanged(DiscountPoint[] points)`
+
+**Access Control**: Only callable by contract owner.
+
+**Reverts**:
+- `InvalidDiscountPoint()` - If any point has `t = 0`
+
+**Example**:
+
+```solidity
+// Configure discount tiers:
+// Year 1: 0% discount
+// Year 2+: 10% discount
+DiscountPoint[] memory points = new DiscountPoint[](2);
+points[0] = DiscountPoint({
+    t: 365 days,
+    value: 0  // 0% discount for first year
+});
+points[1] = DiscountPoint({
+    t: 365 days,
+    value: type(uint128).max / 10  // 10% discount for subsequent years
+});
+
+oracle.updateDiscountPoints(points);
+```
+
+### updatePremiumPricing
+
+```solidity
+function updatePremiumPricing(
+    uint256 initialPrice,
+    uint64 halvingPeriod,
+    uint64 period
+) external onlyOwner
+```
+
+Update the premium pricing function for recently expired names.
+
+<ParamField path="initialPrice" type="uint256" required>
+  The initial premium price in base units. Set to 0 to disable premium pricing.
+</ParamField>
+
+<ParamField path="halvingPeriod" type="uint64" required>
+  Duration (in seconds) for the premium to decay by half
+</ParamField>
+
+<ParamField path="period" type="uint64" required>
+  Total duration (in seconds) until premium reaches zero
+</ParamField>
+
+**Events Emitted**:
+- `PremiumPricingChanged(uint256 indexed initialPrice, uint64 indexed halvingPeriod, uint64 indexed period)`
+
+**Access Control**: Only callable by contract owner.
+
+**Notes**:
+- `premiumPriceAfter(0)` returns the exact starting premium
+- `premiumPriceAfter(halvingPeriod)` ≈ `initialPrice / 2`
+- `premiumPriceAfter(halvingPeriod * x)` ≈ `initialPrice / 2^x`
+- `premiumPriceAfter(period)` = 0
+
+**Example**:
+
+```solidity
+// Set premium to start at 100 ETH equivalent,
+// halve every 7 days, reach zero after 28 days
+oracle.updatePremiumPricing(
+    100 ether,    // Initial premium
+    7 days,       // Halving period
+    28 days       // Total premium period
+);
+```
+
+### updatePaymentToken
+
+```solidity
+function updatePaymentToken(
+    IERC20 paymentToken,
+    uint128 numer,
+    uint128 denom
+) external onlyOwner
+```
+
+Add, update, or remove a payment token and its exchange rate.
+
+<ParamField path="paymentToken" type="IERC20" required>
+  The ERC-20 token contract address
+</ParamField>
+
+<ParamField path="numer" type="uint128" required>
+  Exchange rate numerator. Must be non-zero to add/update.
+</ParamField>
+
+<ParamField path="denom" type="uint128" required>
+  Exchange rate denominator. Set to 0 to remove the token.
+</ParamField>
+
+**Events Emitted**:
+- `PaymentTokenAdded(IERC20 indexed paymentToken)` - When token is newly supported
+- `PaymentTokenRemoved(IERC20 indexed paymentToken)` - When token support is removed
+
+**Access Control**: Only callable by contract owner.
+
+**Reverts**:
+- `InvalidRatio()` - If `numer = 0` when `denom > 0`
+
+**Example**:
+
+```solidity
+// Add USDC with 6 decimals
+// If base unit is wei (18 decimals), convert: price_usdc = price_wei * 1 / 10^12
+oracle.updatePaymentToken(
+    IERC20(usdcAddress),
+    1,           // numerator
+    10**12       // denominator
+);
+
+// Remove a token
+oracle.updatePaymentToken(
+    IERC20(tokenToRemove),
+    0,
+    0
+);
+```
+
+### getBaseRates
+
+```solidity
+function getBaseRates() external view returns (uint256[] memory)
+```
+
+Get all configured base rates.
+
+<ResponseField name="rates" type="uint256[]">
+  Array of base rates in base units per second, indexed by codepoint count minus one
+</ResponseField>
+
+**Example**:
+
+```solidity
+uint256[] memory rates = oracle.getBaseRates();
+// rates[0] = rate for 1 codepoint
+// rates[1] = rate for 2 codepoints
+// etc.
+```
+
+### getDiscountPoints
+
+```solidity
+function getDiscountPoints() external view returns (DiscountPoint[] memory)
+```
+
+Get all configured discount points.
+
+<ResponseField name="points" type="DiscountPoint[]">
+  Array of discount points defining the discount function
+</ResponseField>
+
+**Example**:
+
+```solidity
+DiscountPoint[] memory points = oracle.getDiscountPoints();
+for (uint i = 0; i < points.length; i++) {
+    // Process each discount tier
+}
+```
+
+### isValid
+
+```solidity
+function isValid(string calldata label) external view returns (bool)
+```
+
+Check if a label is valid for registration according to pricing rules.
+
+<ParamField path="label" type="string" required>
+  The name to validate (without .eth suffix)
+</ParamField>
+
+<ResponseField name="valid" type="bool">
+  `true` if the label has a non-zero base rate configured (and is therefore valid for registration)
+</ResponseField>
+
+**Note**: This function does not check if the label is normalized. It only checks if a base rate exists.
+
+**Example**:
+
+```solidity
+if (oracle.isValid("myname")) {
+    // Name length has a configured price
+}
+```
+
+### isPaymentToken
+
+```solidity
+function isPaymentToken(IERC20 paymentToken) public view returns (bool)
+```
+
+Check if a token is supported for payment.
+
+<ParamField path="paymentToken" type="IERC20" required>
+  The ERC-20 token contract address to check
+</ParamField>
+
+<ResponseField name="supported" type="bool">
+  `true` if the token is accepted for payments
+</ResponseField>
+
+**Example**:
+
+```solidity
+if (oracle.isPaymentToken(IERC20(usdcAddress))) {
+    // USDC is accepted
+}
+```
+
+### baseRate
+
+```solidity
+function baseRate(string memory label) public view returns (uint256)
+```
+
+Get the base rate per second for a label.
+
+<ParamField path="label" type="string" required>
+  The name to price
+</ParamField>
+
+<ResponseField name="rate" type="uint256">
+  The base rate in base units per second, or 0 if the label is not valid (too long, too short, or no rate configured)
+</ResponseField>
+
+**Example**:
+
+```solidity
+uint256 rate = oracle.baseRate("myname");
+uint256 annualCost = rate * 365 days;
+```
+
+### integratedDiscount
+
+```solidity
+function integratedDiscount(uint64 duration) public view returns (uint256)
+```
+
+Compute the integral of the discount function over a duration.
+
+<ParamField path="duration" type="uint64" required>
+  The registration duration in seconds
+</ParamField>
+
+<ResponseField name="integral" type="uint256">
+  The integrated discount value. Divide by `duration` to get the average discount percentage.
+</ResponseField>
+
+**Usage**: `integratedDiscount(t) / t` gives the average discount percentage over duration `t`.
+
+**Example**:
+
+```solidity
+// Calculate average discount for 2 year registration
+uint64 twoYears = 730 days;
+uint256 avgDiscount = oracle.integratedDiscount(twoYears) / twoYears;
+```
+
+### premiumPrice
+
+```solidity
+function premiumPrice(uint64 expiry) public view returns (uint256)
+```
+
+Get the current premium price for a name based on its expiry time.
+
+<ParamField path="expiry" type="uint64" required>
+  The expiration timestamp of the name
+</ParamField>
+
+<ResponseField name="premium" type="uint256">
+  The premium price in base units. Returns 0 if the name hasn't expired yet or if the premium period has passed.
+</ResponseField>
+
+**Example**:
+
+```solidity
+// Get premium for a name that expired
+IPermissionedRegistry.State memory state = registry.getState(tokenId);
+uint256 premium = oracle.premiumPrice(state.expiry);
+```
+
+### premiumPriceAfter
+
+```solidity
+function premiumPriceAfter(uint64 duration) public view returns (uint256)
+```
+
+Get the premium price at a specific duration after expiration.
+
+<ParamField path="duration" type="uint64" required>
+  Time elapsed since expiration, in seconds
+</ParamField>
+
+<ResponseField name="premium" type="uint256">
+  The premium price in base units at that point in time. Returns 0 if `duration >= premiumPeriod`.
+</ResponseField>
+
+**Note**: Defined over `[0, premiumPeriod)`.
+
+**Example**:
+
+```solidity
+// What would the premium be 3 days after expiration?
+uint256 premium = oracle.premiumPriceAfter(3 days);
+```
+
+### rentPrice
+
+```solidity
+function rentPrice(
+    string memory label,
+    address owner,
+    uint64 duration,
+    IERC20 paymentToken
+) public view returns (uint256 base, uint256 premium)
+```
+
+Calculate the complete registration or renewal price for a name.
+
+<ParamField path="label" type="string" required>
+  The name to price (without .eth suffix)
+</ParamField>
+
+<ParamField path="owner" type="address" required>
+  The prospective owner address. If this matches the current owner, no premium is charged. Use zero address to exclude premium for price estimation.
+</ParamField>
+
+<ParamField path="duration" type="uint64" required>
+  The registration duration in seconds
+</ParamField>
+
+<ParamField path="paymentToken" type="IERC20" required>
+  The ERC-20 token to use for payment
+</ParamField>
+
+<ResponseField name="base" type="uint256">
+  The base price in payment token units, including duration discounts if applicable
+</ResponseField>
+
+<ResponseField name="premium" type="uint256">
+  The premium price in payment token units (0 if owner matches current owner or name is not expired)
+</ResponseField>
+
+**Reverts**:
+- `PaymentTokenNotSupported(IERC20 paymentToken)` - If the payment token isn't supported
+- `NotValid(string label)` - If the label has no configured base rate
+
+**Pricing Formula**:
+1. Calculate base units: `baseRate(label) * duration`
+2. Apply duration discount based on current expiry and registration duration
+3. Calculate premium if applicable (owner doesn't match current owner)
+4. Convert to payment token using configured exchange rate
+
+**Example**:
+
+```solidity
+// Get price for new registration
+(uint256 base, uint256 premium) = oracle.rentPrice(
+    "myname",
+    msg.sender,
+    365 days,
+    IERC20(usdcAddress)
+);
+
+uint256 totalCost = base + premium;
+
+// Get renewal price (current owner pays no premium)
+(uint256 renewalBase, ) = oracle.rentPrice(
+    "myname",
+    currentOwner,  // Same as registered owner
+    365 days,
+    IERC20(usdcAddress)
+);
+
+// Get price estimate without premium
+(uint256 estimateBase, ) = oracle.rentPrice(
+    "myname",
+    address(0),  // Null address excludes premium
+    365 days,
+    IERC20(usdcAddress)
+);
+```
+
+## Events
+
+### DiscountPointsChanged
+
+```solidity
+event DiscountPointsChanged(DiscountPoint[] points)
+```
+
+Emitted when discount points are updated.
+
+<ResponseField name="points" type="DiscountPoint[]">
+  The new discount point configuration
+</ResponseField>
+
+### BaseRatesChanged
+
+```solidity
+event BaseRatesChanged(uint256[] ratePerCp)
+```
+
+Emitted when base rates are updated.
+
+<ResponseField name="ratePerCp" type="uint256[]">
+  The new base rate configuration
+</ResponseField>
+
+### PremiumPricingChanged
+
+```solidity
+event PremiumPricingChanged(
+    uint256 indexed initialPrice,
+    uint64 indexed halvingPeriod,
+    uint64 indexed period
+)
+```
+
+Emitted when premium pricing parameters are updated.
+
+<ResponseField name="initialPrice" type="uint256" indexed>
+  The new initial premium price
+</ResponseField>
+
+<ResponseField name="halvingPeriod" type="uint64" indexed>
+  The new halving period
+</ResponseField>
+
+<ResponseField name="period" type="uint64" indexed>
+  The new total premium period
+</ResponseField>
+
+### PaymentTokenAdded
+
+```solidity
+event PaymentTokenAdded(IERC20 indexed paymentToken)
+```
+
+Emitted when a payment token is added or updated.
+
+<ResponseField name="paymentToken" type="IERC20" indexed>
+  The token that was added or updated
+</ResponseField>
+
+### PaymentTokenRemoved
+
+```solidity
+event PaymentTokenRemoved(IERC20 indexed paymentToken)
+```
+
+Emitted when a payment token is removed.
+
+<ResponseField name="paymentToken" type="IERC20" indexed>
+  The token that was removed
+</ResponseField>
+
+## Errors
+
+### InvalidRatio
+
+```solidity
+error InvalidRatio()
+```
+
+The payment token exchange rate is invalid (numerator is zero when denominator is non-zero).
+
+**Error Selector**: `0x648564d3`
+
+### InvalidDiscountPoint
+
+```solidity
+error InvalidDiscountPoint()
+```
+
+A discount point has an invalid time interval (`t = 0`).
+
+**Error Selector**: `0xd1be8bbe`
+
+### NotValid
+
+```solidity
+error NotValid(string label)
+```
+
+The label is not valid for registration (no base rate configured).
+
+**Error Selector**: `0xdbfa2886`
+
+### PaymentTokenNotSupported
+
+```solidity
+error PaymentTokenNotSupported(IERC20 paymentToken)
+```
+
+The payment token is not supported.
+
+**Error Selector**: `0x02e2ae9e`
+
+## Pricing Model
+
+### Base Pricing
+
+Base prices are determined by the number of Unicode codepoints in the name:
+
+1. Count codepoints using `StringUtils.strlen()`
+2. Look up the rate in the `_baseRatePerCp` array
+3. Multiply rate by duration to get base units
+
+**Example Configuration**:
+```
+1 codepoint:  1000 wei/second → $100,000/year
+2 codepoints: 100 wei/second  → $10,000/year
+3+ codepoints: 10 wei/second  → $1,000/year
+```
+
+### Duration Discounts
+
+Discounts incentivize longer registration periods:
+
+1. Each `DiscountPoint` defines an incremental time period and discount rate
+2. The integral of the discount function is computed over the registration duration
+3. The average discount is applied to the base price
+
+**Example**: To achieve a 5% average discount for 2-year registrations:
+- Year 1: 0% discount
+- Year 2: 10% discount
+- Average: (0% + 10%) / 2 = 5%
+
+### Premium Pricing
+
+Premium pricing prevents immediate re-registration of expired names:
+
+1. Premium starts at `premiumPriceInitial` when a name expires
+2. Decays exponentially with half-life of `premiumHalvingPeriod`
+3. Reaches zero after `premiumPeriod` seconds
+4. Current owner pays no premium on renewals
+
+**Formula**: Uses `LibHalving.halving()` for exponential decay calculation.
+
+**Example**:
+```
+Initial: 100 ETH
+Halving: 7 days
+Period: 28 days
+
+Day 0:  100 ETH
+Day 7:  ~50 ETH
+Day 14: ~25 ETH
+Day 21: ~12.5 ETH
+Day 28: 0 ETH
+```
+
+### Multi-Token Support
+
+Prices are calculated in base units then converted to payment tokens:
+
+```
+price_token = (price_baseUnits * numer) / denom
+```
+
+**Example**: For USDC (6 decimals) with base units in wei (18 decimals):
+```
+numer = 1
+denom = 10^12
+price_usdc = price_wei / 10^12
+```
+
+## Integration Examples
+
+### Calculating Multi-Year Discount
+
+```solidity
+contract PriceCalculator {
+    StandardRentPriceOracle public oracle;
+    
+    function compareYearlyPrices(
+        string memory label,
+        IERC20 paymentToken
+    ) external view returns (
+        uint256 oneYearTotal,
+        uint256 threeYearTotal,
+        uint256 savings
+    ) {
+        address nullOwner = address(0); // Exclude premium
+        
+        // 1 year price
+        (uint256 base1, ) = oracle.rentPrice(
+            label,
+            nullOwner,
+            365 days,
+            paymentToken
+        );
+        oneYearTotal = base1 * 3; // Cost to renew 3 times
+        
+        // 3 year price with discount
+        (uint256 base3, ) = oracle.rentPrice(
+            label,
+            nullOwner,
+            3 * 365 days,
+            paymentToken
+        );
+        threeYearTotal = base3;
+        
+        savings = oneYearTotal - threeYearTotal;
+    }
+}
+```
+
+### Premium Decay Tracker
+
+```solidity
+contract PremiumTracker {
+    StandardRentPriceOracle public oracle;
+    IPermissionedRegistry public registry;
+    
+    function trackPremiumDecay(
+        uint256 tokenId,
+        IERC20 paymentToken
+    ) external view returns (
+        uint256 currentPremium,
+        uint256 premiumIn1Week,
+        uint256 premiumIn2Weeks
+    ) {
+        IPermissionedRegistry.State memory state = registry.getState(tokenId);
+        string memory label = "example"; // Get from token metadata
+        
+        // Current premium
+        (, currentPremium) = oracle.rentPrice(
+            label,
+            msg.sender, // Not current owner
+            365 days,
+            paymentToken
+        );
+        
+        // Premium in 1 week
+        uint64 timeAfterExpiry = uint64(block.timestamp) - state.expiry + 7 days;
+        uint256 premiumUnits1Week = oracle.premiumPriceAfter(timeAfterExpiry);
+        
+        // Convert to payment token
+        // (Simplified - actual conversion needs the payment ratio)
+        premiumIn1Week = premiumUnits1Week;
+        
+        // Premium in 2 weeks
+        uint64 timeAfterExpiry2 = uint64(block.timestamp) - state.expiry + 14 days;
+        premiumIn2Weeks = oracle.premiumPriceAfter(timeAfterExpiry2);
+    }
+}
+```
+
+### Custom Pricing Oracle
+
+```solidity
+contract CustomOracle is IRentPriceOracle {
+    StandardRentPriceOracle public standardOracle;
+    
+    // Override pricing for specific labels
+    mapping(bytes32 => uint256) public customPrices;
+    
+    function rentPrice(
+        string memory label,
+        address owner,
+        uint64 duration,
+        IERC20 paymentToken
+    ) external view returns (uint256 base, uint256 premium) {
+        bytes32 labelHash = keccak256(bytes(label));
+        
+        // Check for custom price
+        if (customPrices[labelHash] > 0) {
+            base = customPrices[labelHash] * duration;
+            premium = 0; // No premium for custom prices
+        } else {
+            // Fall back to standard pricing
+            return standardOracle.rentPrice(label, owner, duration, paymentToken);
+        }
+    }
+    
+    // Implement other IRentPriceOracle functions...
+}
+```

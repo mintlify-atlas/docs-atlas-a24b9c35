@@ -1,0 +1,426 @@
+---
+title: Testing
+description: Run and write tests for ENS v2 contracts
+---
+
+## Test Framework Overview
+
+ENS v2 uses a dual testing approach:
+
+- **Forge (Foundry)**: Solidity-based unit tests for core contract logic
+- **Hardhat + Vitest**: TypeScript integration tests for complex scenarios
+- **End-to-End (E2E)**: Full stack tests using the devnet
+
+## Prerequisites
+
+Before running tests, compile the `ens-contracts` library:
+
+```bash
+cd lib/ens-contracts
+bun run compile
+cd ../..
+```
+
+## Running Tests
+
+### All Tests
+
+Run the complete test suite:
+
+```bash
+bun run test
+```
+
+This executes both Forge and Hardhat tests sequentially.
+
+### Forge Tests
+
+Run Solidity unit tests using Foundry:
+
+<CodeGroup>
+```bash All Forge tests
+bun run test:forge
+# or
+forge test
+```
+
+```bash Specific test file
+forge test --match-path test/registry/PermissionedRegistry.t.sol
+```
+
+```bash Specific test function
+forge test --match-test testRegisterName
+```
+
+```bash With gas reporting
+forge test --gas-report
+```
+
+```bash With verbosity
+forge test -vvv
+# -v: Show test names
+# -vv: Show logs for failing tests
+# -vvv: Show logs for all tests
+# -vvvv: Show traces for failing tests
+# -vvvvv: Show traces for all tests
+```
+</CodeGroup>
+
+### Hardhat Tests
+
+Run TypeScript integration tests:
+
+<CodeGroup>
+```bash All Hardhat tests
+bun run test:hardhat
+```
+
+```bash Specific test file
+bun run test:hardhat test/integration/ENSV2Resolver.test.ts
+```
+</CodeGroup>
+
+Hardhat tests are configured in `vitest.config.ts`:
+
+```typescript
+export default defineConfig({
+  test: {
+    reporters: ["verbose"],
+    include: ["test/integration/**/*.test.ts"],
+    setupFiles: ["test/integration/vitest-setup.ts"],
+  },
+});
+```
+
+### End-to-End Tests
+
+Run E2E tests against a local devnet:
+
+```bash
+bun run test:e2e
+```
+
+E2E tests are located in `test/e2e/` and include:
+
+- `devnet.test.ts`: Devnet functionality tests
+- `resolve.test.ts`: Name resolution tests
+
+## Test Coverage
+
+### Generate Coverage Reports
+
+<Steps>
+  <Step title="Run Forge coverage">
+    ```bash
+    bun run coverage:forge
+    ```
+    
+    Generates `coverage/forge.lcov`
+  </Step>
+
+  <Step title="Run Hardhat coverage">
+    ```bash
+    bun run coverage:hardhat
+    ```
+    
+    Generates coverage data for TypeScript tests
+  </Step>
+
+  <Step title="Generate combined reports">
+    ```bash
+    bun run coverage:reports
+    ```
+  </Step>
+
+  <Step title="Run all coverage (recommended)">
+    ```bash
+    bun run coverage
+    ```
+    
+    Runs all three commands above in sequence
+  </Step>
+</Steps>
+
+<Note>
+  Coverage requires `lcov` to be installed. See [Setup](/development/setup#prerequisites) for installation instructions.
+</Note>
+
+## Writing Tests
+
+### Forge Test Guidelines
+
+Forge tests are located in files ending with `.t.sol`:
+
+```solidity
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.25;
+
+import {Test} from "forge-std/Test.sol";
+import {PermissionedRegistry} from "src/registry/PermissionedRegistry.sol";
+import {RegistryRolesLib} from "src/registry/libraries/RegistryRolesLib.sol";
+
+contract PermissionedRegistryTest is Test {
+    PermissionedRegistry public registry;
+    address public owner = address(1);
+    address public user = address(2);
+
+    function setUp() public {
+        // Setup runs before each test
+        registry = new PermissionedRegistry(
+            hcaFactory,
+            metadata,
+            owner,
+            RegistryRolesLib.ALL_ROLES
+        );
+    }
+
+    function testRegisterName() public {
+        vm.prank(owner);
+        uint256 tokenId = registry.register(
+            "test",
+            user,
+            address(0),
+            address(0),
+            0,
+            type(uint64).max
+        );
+        
+        assertEq(registry.ownerOf(tokenId), user);
+    }
+}
+```
+
+#### Event Testing
+
+<Warning>
+  Never use `vm.expectEmit()` for event testing. Always use `vm.recordLogs()` and verify logs manually.
+</Warning>
+
+```solidity
+function testEventEmission() public {
+    vm.recordLogs();
+    
+    // Perform action that emits events
+    registry.register("test", user, address(0), address(0), 0, type(uint64).max);
+    
+    // Get and verify logs
+    Vm.Log[] memory logs = vm.getRecordedLogs();
+    assertEq(logs.length, 2); // Transfer + NewSubname
+    
+    // Verify specific event data
+    assertEq(logs[1].topics[0], keccak256("NewSubname(uint256,string)"));
+}
+```
+
+#### vm.prank and vm.expectRevert
+
+<Warning>
+  When using `vm.prank` and `vm.expectRevert` together, always place `vm.expectRevert` **before** `vm.prank`.
+</Warning>
+
+```solidity
+// Correct order
+function testUnauthorizedAccess() public {
+    vm.expectRevert(abi.encodeWithSignature("Unauthorized()"));
+    vm.prank(user);
+    registry.adminFunction();
+}
+
+// Wrong order - will fail
+function testUnauthorizedAccessWrong() public {
+    vm.prank(user);  // Don't do this
+    vm.expectRevert(abi.encodeWithSignature("Unauthorized()"));
+    registry.adminFunction();
+}
+```
+
+#### Using Defined Constants
+
+<Tip>
+  Always use constants defined in source contracts instead of hardcoding values in tests.
+</Tip>
+
+```solidity
+import {RegistryRolesLib} from "src/registry/libraries/RegistryRolesLib.sol";
+
+// Good - uses defined constant
+function testGrantRole() public {
+    registry.grantRoles(tokenId, RegistryRolesLib.ROLE_SET_RESOLVER, user);
+}
+
+// Bad - hardcoded value
+function testGrantRoleBad() public {
+    registry.grantRoles(tokenId, 1 << 12, user);  // Don't do this
+}
+```
+
+### Hardhat Test Guidelines
+
+Hardhat tests use Vitest and are written in TypeScript:
+
+```typescript
+import { beforeAll, describe, expect, it } from "vitest";
+import { parseEther } from "viem";
+
+describe("ETHRegistrar", () => {
+  let env: DevnetEnvironment;
+  let owner: Account;
+
+  beforeAll(async () => {
+    env = await setupDevnet();
+    owner = env.namedAccounts.owner;
+  });
+
+  it("should register a name", async () => {
+    const label = "test";
+    const duration = 365n * 86400n; // 1 year
+
+    await env.deployment.contracts.ETHRegistrar.write.register(
+      [label, owner.address, duration],
+      { value: parseEther("0.01") }
+    );
+
+    const tokenId = await env.deployment.contracts.ETHRegistry.read.getTokenId(
+      [label]
+    );
+    
+    expect(
+      await env.deployment.contracts.ETHRegistry.read.ownerOf([tokenId])
+    ).toBe(owner.address);
+  });
+});
+```
+
+## Fuzz Testing
+
+Forge includes built-in fuzzing support. Configure in `foundry.toml`:
+
+```toml
+[fuzz]
+runs = 4096
+```
+
+Write fuzz tests by adding parameters to test functions:
+
+```solidity
+function testRegisterFuzz(string calldata label, address owner) public {
+    // Assumptions to constrain inputs
+    vm.assume(bytes(label).length > 0 && bytes(label).length < 256);
+    vm.assume(owner != address(0));
+    
+    // Test with random inputs
+    uint256 tokenId = registry.register(
+        label,
+        owner,
+        address(0),
+        address(0),
+        0,
+        type(uint64).max
+    );
+    
+    assertEq(registry.ownerOf(tokenId), owner);
+}
+```
+
+## Test Organization
+
+### Directory Structure
+
+```
+test/
+├── *.t.sol                    # Forge unit tests
+├── integration/               # Hardhat integration tests
+│   ├── vitest-setup.ts       # Test setup
+│   ├── fixtures/             # Test fixtures
+│   │   ├── deployV1Fixture.ts
+│   │   ├── deployV2Fixture.ts
+│   │   └── deployVerifiableProxy.ts
+│   ├── ENSV1Resolver.test.ts
+│   ├── ENSV2Resolver.test.ts
+│   └── dns/
+│       ├── DNSTLDResolver.test.ts
+│       └── DNSTLDResolver.mainnet.test.ts
+├── e2e/                      # End-to-end tests
+│   ├── test-setup.ts
+│   ├── devnet.test.ts
+│   └── resolve.test.ts
+├── mocks/                    # Mock contracts
+└── utils/                    # Test utilities
+    ├── expectVar.ts
+    ├── resolutions.ts
+    └── waitForSuccessfulTransactionReceipt.ts
+```
+
+### Test Categories
+
+- **Unit tests** (`.t.sol`): Test individual contract functions in isolation
+- **Integration tests** (`integration/*.test.ts`): Test interactions between contracts
+- **E2E tests** (`e2e/*.test.ts`): Test complete workflows on devnet
+- **Mainnet fork tests** (`*.mainnet.test.ts`): Test against mainnet state
+
+## Debugging Tests
+
+### Forge Debugging
+
+<CodeGroup>
+```bash Increase verbosity
+forge test -vvvv --match-test testName
+```
+
+```bash Show stack traces
+forge test -vvvvv
+```
+
+```bash Debug specific test
+forge debug --match-test testName
+```
+</CodeGroup>
+
+### Console Logging
+
+In Forge tests, use `console.log` from `forge-std`:
+
+```solidity
+import {console} from "forge-std/console.sol";
+
+function testWithLogging() public {
+    console.log("Token ID:", tokenId);
+    console.log("Owner:", owner);
+    console.logBytes32(keccak256("test"));
+}
+```
+
+### Hardhat Debugging
+
+In Hardhat tests, use standard JavaScript debugging:
+
+```typescript
+it("should debug", async () => {
+  console.log("Contract address:", contract.address);
+  console.log("Balance:", await client.getBalance({ address: owner.address }));
+});
+```
+
+## Continuous Integration
+
+Tests run automatically on GitHub Actions. See `.github/workflows/main.yml` for the CI configuration.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Local Devnet" icon="server" href="/development/devnet">
+    Set up a local development network
+  </Card>
+  
+  <Card title="Deployment" icon="rocket" href="/development/deployment">
+    Deploy contracts to networks
+  </Card>
+  
+  <Card title="Development Setup" icon="wrench" href="/development/setup">
+    Configure your environment
+  </Card>
+  
+  <Card title="Contract Reference" icon="book" href="/api/registry/permissioned-registry">
+    Explore contract APIs
+  </Card>
+</CardGroup>

@@ -1,0 +1,459 @@
+---
+title: 'DNSTXTResolver'
+description: 'Resolver that extracts ENS records from DNSSEC TXT record context data'
+---
+
+## Overview
+
+The `DNSTXTResolver` is a specialized resolver that parses ENS record data embedded in DNS TXT records. It's designed to work with DNSSEC-validated TXT records that contain ENS profile information in a structured format.
+
+**Primary Use Case**: DNS names (like `.com` domains) that want to expose ENS-compatible resolver data through DNSSEC TXT records.
+
+**Key Features**:
+- Stateless resolver (no storage)
+- Parses data from DNS context strings
+- Supports addresses, text records, contenthash, and pubkeys
+- Multi-coin address support with EVM chain defaulting
+- Works with DNSSEC validation
+
+**Implements**: `IExtendedDNSResolver`, `IERC7996`
+
+## DNS TXT Record Format
+
+The resolver expects TXT records in this format:
+
+```
+ENS1 dnstxt.ens.eth <context>
+```
+
+Where `<context>` is a space-separated list of records:
+
+### Supported Record Formats
+
+#### Text Records
+
+```
+t[key]=value              // Unquoted value
+t[description]="Once upon a time..."  // Quoted value
+t[notice]="\"ENS!\""      // Quoted with escapes
+```
+
+**Examples**:
+- `t[age]=18`
+- `t[avatar]="https://example.com/avatar.png"`
+- `t[description]="A developer who likes \"ENS\"."`
+
+#### Addresses (Coin Types)
+
+```
+a[60]=0x8000000000000000000000000000000000000001  // Ethereum (ENSIP-1)
+a[0]=0x00...                                        // Bitcoin (ENSIP-9)
+a[e0]=0x1234567890123456789012345678901234567890  // Default EVM
+a[e59144]=0x...                                     // Linea (chain 59144)
+```
+
+**Coin Type Formats**:
+- `a[60]` - Ethereum mainnet (standard SLIP-0044)
+- `a[0]` - Bitcoin (standard SLIP-0044)
+- `a[e<chainId>]` - EVM chain by chain ID
+- `a[e0]` - Default EVM address (used as fallback)
+
+#### Content Hash
+
+```
+c=0xe3010170122029f2d17be6139079dc48696d1f582a8530eb9805b561eda517e22a892c7e3f1f
+```
+
+**Format**: `c=<ENSIP-7 encoded contenthash>`
+
+#### Public Key
+
+```
+xy=0x<64 hex bytes>
+```
+
+**Format**: `xy=<concatenated x and y coordinates>`
+
+### Complete Example
+
+```
+ENS1 dnstxt.ens.eth a[60]=0x1234567890123456789012345678901234567890 t[avatar]="https://example.com/avatar.png" t[description]="ENS Developer" c=0xe301...
+```
+
+## Constructor
+
+```solidity
+constructor()
+```
+
+No initialization required. This is a stateless contract.
+
+## Functions
+
+### resolve
+
+```solidity
+function resolve(
+    bytes calldata name,
+    bytes calldata data,
+    bytes calldata context
+) external view returns (bytes memory result)
+```
+
+Resolves a query by parsing data from the DNS context string.
+
+<ParamField path="name" type="bytes" required>
+  The DNS-encoded name (typically unused by this resolver)
+</ParamField>
+
+<ParamField path="data" type="bytes" required>
+  The ABI-encoded resolver query (e.g., `abi.encodeCall(IAddrResolver.addr, (node))`)
+</ParamField>
+
+<ParamField path="context" type="bytes" required>
+  The DNS TXT record context data containing the ENS records
+</ParamField>
+
+<ResponseField name="result" type="bytes">
+  The ABI-encoded response data
+</ResponseField>
+
+**Supported Query Selectors**:
+- `IAddrResolver.addr(bytes32)` - Get Ethereum address
+- `IAddressResolver.addr(bytes32,uint256)` - Get multi-coin address
+- `IHasAddressResolver.hasAddr(bytes32,uint256)` - Check if address exists
+- `ITextResolver.text(bytes32,string)` - Get text record
+- `IContentHashResolver.contenthash(bytes32)` - Get contenthash
+- `IPubkeyResolver.pubkey(bytes32)` - Get public key
+- `IMulticallable.multicall(bytes[])` - Batch multiple queries
+
+**Example**:
+```solidity
+// Context from DNS TXT record
+bytes memory context = "a[60]=0x1234567890123456789012345678901234567890 t[avatar]='https://example.com/avatar.png'";
+
+// Query Ethereum address
+bytes memory query = abi.encodeCall(IAddrResolver.addr, (bytes32(0)));
+bytes memory result = resolver.resolve("", query, context);
+address ethAddr = abi.decode(result, (address));
+
+// Query text record
+query = abi.encodeCall(ITextResolver.text, (bytes32(0), "avatar"));
+result = resolver.resolve("", query, context);
+string memory avatar = abi.decode(result, (string));
+```
+
+### supportsInterface
+
+```solidity
+function supportsInterface(bytes4 interfaceId) public view returns (bool)
+```
+
+EIP-165 interface detection.
+
+<ParamField path="interfaceId" type="bytes4" required>
+  The interface identifier to check
+</ParamField>
+
+<ResponseField name="return" type="bool">
+  True if the interface is supported
+</ResponseField>
+
+**Supported Interfaces**:
+- `IExtendedDNSResolver`
+- `IERC7996`
+- `IERC165`
+
+### supportsFeature
+
+```solidity
+function supportsFeature(bytes4 feature) public pure returns (bool)
+```
+
+ERC-7996 feature detection.
+
+<ParamField path="feature" type="bytes4" required>
+  The feature identifier to check
+</ParamField>
+
+<ResponseField name="return" type="bool">
+  True if feature is supported (returns true for `RESOLVE_MULTICALL`)
+</ResponseField>
+
+## Query Examples
+
+### Ethereum Address Query
+
+```solidity
+// Context with Ethereum address
+bytes memory context = "a[60]=0x1234567890123456789012345678901234567890";
+
+// Query
+bytes memory query = abi.encodeCall(IAddrResolver.addr, (bytes32(0)));
+bytes memory result = resolver.resolve("", query, context);
+address ethAddr = abi.decode(result, (address));
+// ethAddr = 0x1234567890123456789012345678901234567890
+```
+
+### Multi-Coin Address Query
+
+```solidity
+// Context with Bitcoin and Linea addresses
+bytes memory context = "a[0]=0x00123456 a[e59144]=0x9876543210987654321098765432109876543210";
+
+// Query Bitcoin address
+bytes memory query = abi.encodeCall(IAddressResolver.addr, (bytes32(0), 0));
+bytes memory result = resolver.resolve("", query, context);
+bytes memory btcAddr = abi.decode(result, (bytes));
+
+// Query Linea address (EVM chain 59144)
+query = abi.encodeCall(IAddressResolver.addr, (bytes32(0), 0x800000000000e39990));
+result = resolver.resolve("", query, context);
+bytes memory lineaAddr = abi.decode(result, (bytes));
+```
+
+### Default EVM Address Fallback
+
+```solidity
+// Context with default EVM address only
+bytes memory context = "a[e0]=0x1111111111111111111111111111111111111111";
+
+// Query Arbitrum address (chain 42161) - falls back to default
+uint256 arbitrumCoinType = 0x80000000000000a4b1;
+bytes memory query = abi.encodeCall(IAddressResolver.addr, (bytes32(0), arbitrumCoinType));
+bytes memory result = resolver.resolve("", query, context);
+bytes memory arbAddr = abi.decode(result, (bytes));
+// arbAddr = 0x1111111111111111111111111111111111111111 (from a[e0])
+```
+
+### Text Record Query
+
+```solidity
+// Context with text records
+bytes memory context = "t[avatar]='https://example.com/avatar.png' t[description]='ENS Developer'";
+
+// Query avatar
+bytes memory query = abi.encodeCall(ITextResolver.text, (bytes32(0), "avatar"));
+bytes memory result = resolver.resolve("", query, context);
+string memory avatar = abi.decode(result, (string));
+// avatar = "https://example.com/avatar.png"
+
+// Query description
+query = abi.encodeCall(ITextResolver.text, (bytes32(0), "description"));
+result = resolver.resolve("", query, context);
+string memory desc = abi.decode(result, (string));
+// desc = "ENS Developer"
+```
+
+### Contenthash Query
+
+```solidity
+// Context with IPFS contenthash
+bytes memory context = "c=0xe3010170122029f2d17be6139079dc48696d1f582a8530eb9805b561eda517e22a892c7e3f1f";
+
+// Query
+bytes memory query = abi.encodeCall(IContentHashResolver.contenthash, (bytes32(0)));
+bytes memory result = resolver.resolve("", query, context);
+bytes memory hash = abi.decode(result, (bytes));
+```
+
+### Public Key Query
+
+```solidity
+// Context with pubkey (64 bytes = 128 hex chars)
+bytes memory context = "xy=0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
+
+// Query
+bytes memory query = abi.encodeCall(IPubkeyResolver.pubkey, (bytes32(0)));
+bytes memory result = resolver.resolve("", query, context);
+(bytes32 x, bytes32 y) = abi.decode(result, (bytes32, bytes32));
+```
+
+### Multicall Query
+
+```solidity
+// Context with multiple records
+bytes memory context = "a[60]=0x1234567890123456789012345678901234567890 t[avatar]='https://example.com/avatar.png' t[url]='https://example.com'";
+
+// Build multicall
+bytes[] memory calls = new bytes[](3);
+calls[0] = abi.encodeCall(IAddrResolver.addr, (bytes32(0)));
+calls[1] = abi.encodeCall(ITextResolver.text, (bytes32(0), "avatar"));
+calls[2] = abi.encodeCall(ITextResolver.text, (bytes32(0), "url"));
+
+// Execute multicall
+bytes memory query = abi.encodeCall(IMulticallable.multicall, (calls));
+bytes memory result = resolver.resolve("", query, context);
+bytes[] memory results = abi.decode(result, (bytes[]));
+
+// Decode results
+address ethAddr = abi.decode(results[0], (address));
+string memory avatar = abi.decode(results[1], (string));
+string memory url = abi.decode(results[2], (string));
+```
+
+### Check Address Existence
+
+```solidity
+// Context
+bytes memory context = "a[60]=0x1234567890123456789012345678901234567890";
+
+// Check if Ethereum address exists
+bytes memory query = abi.encodeCall(IHasAddressResolver.hasAddr, (bytes32(0), 60));
+bytes memory result = resolver.resolve("", query, context);
+bool hasEthAddr = abi.decode(result, (bool));
+// hasEthAddr = true
+
+// Check if Bitcoin address exists
+query = abi.encodeCall(IHasAddressResolver.hasAddr, (bytes32(0), 0));
+result = resolver.resolve("", query, context);
+bool hasBtcAddr = abi.decode(result, (bool));
+// hasBtcAddr = false
+```
+
+## Errors
+
+### UnsupportedResolverProfile
+
+```solidity
+error UnsupportedResolverProfile(bytes4 selector)
+```
+
+Thrown when an unsupported resolver function selector is used.
+
+**Error Selector**: `0x7b1c461b`
+
+**Example**:
+```solidity
+// This will revert because setAddr is not supported (read-only resolver)
+bytes memory query = abi.encodeCall(IAddrResolver.setAddr, (bytes32(0), address(0)));
+resolver.resolve("", query, context); // Reverts with UnsupportedResolverProfile
+```
+
+### InvalidHexData
+
+```solidity
+error InvalidHexData(bytes data)
+```
+
+Thrown when data is not a valid hex string (must match `/^0x[0-9a-fA-F]*$/`).
+
+**Error Selector**: `0x626777b1`
+
+**Example**:
+```solidity
+// Invalid hex in context
+bytes memory context = "a[60]=0xGGGG"; // Invalid hex characters
+resolver.resolve("", query, context); // Reverts with InvalidHexData
+```
+
+### InvalidDataLength
+
+```solidity
+error InvalidDataLength(bytes data, uint256 expected)
+```
+
+Thrown when data has an unexpected length (e.g., EVM address not 20 bytes, pubkey not 64 bytes).
+
+**Error Selector**: `0xee0c8b99`
+
+**Example**:
+```solidity
+// EVM address with wrong length
+bytes memory context = "a[60]=0x1234"; // Only 2 bytes, need 20
+resolver.resolve("", addrQuery, context); // Reverts with InvalidDataLength
+
+// Pubkey with wrong length  
+context = "xy=0x1234567890abcdef"; // Only 8 bytes, need 64
+resolver.resolve("", pubkeyQuery, context); // Reverts with InvalidDataLength
+```
+
+## DNS Integration Example
+
+### Setting Up TXT Records
+
+```bash
+# Example TXT record for example.com
+example.com. IN TXT "ENS1 dnstxt.ens.eth a[60]=0x1234567890123456789012345678901234567890 t[avatar]='https://example.com/avatar.png' t[email]='contact@example.com' t[url]='https://example.com'"
+```
+
+### Integration with DNSTLDResolver
+
+```solidity
+// DNSTLDResolver calls DNSTXTResolver with context from DNSSEC
+contract DNSTLDResolver {
+    DNSTXTResolver public txtResolver;
+    
+    function resolve(bytes calldata dnsName) external view returns (address) {
+        // 1. Perform DNSSEC validation
+        bytes memory context = performDNSSECValidation(dnsName);
+        // context = "a[60]=0x1234... t[avatar]='https://...'"
+        
+        // 2. Query through DNSTXTResolver
+        bytes memory query = abi.encodeCall(IAddrResolver.addr, (bytes32(0)));
+        bytes memory result = txtResolver.resolve(dnsName, query, context);
+        
+        // 3. Return result
+        return abi.decode(result, (address));
+    }
+}
+```
+
+## Context Parser Grammar
+
+The resolver uses `DNSTXTParserLib` which implements a DFA (Deterministic Finite Automaton) for parsing:
+
+```
+<records> ::= " "* <rr>* " "*
+     <rr> ::= <r> | <r> <rr>
+      <r> ::= <pk> | <kv>
+     <pk> ::= <u> | <u> "[" <a> "]" <u>
+     <kv> ::= <k> "=" <v>
+      <k> ::= <u> | <u> "[" <a> "]"
+      <v> ::= "'" <q> "'" | <u>
+      <q> ::= <all octets except "'" unless preceded by "\">
+      <u> ::= <all octets except " ">
+      <a> ::= <all octets except "]">
+```
+
+**Key Rules**:
+- Records are space-separated
+- Keys can have optional arguments in square brackets: `key[arg]`
+- Values can be unquoted (no spaces) or single-quoted
+- Single quotes in quoted values can be escaped with backslash: `\'`
+- Backslash escapes only work in quoted values
+
+## Coin Type Reference
+
+### Standard SLIP-0044 Coin Types
+
+```solidity
+// Common coin types
+uint256 constant COIN_TYPE_BITCOIN = 0;
+uint256 constant COIN_TYPE_ETHEREUM = 60;
+uint256 constant COIN_TYPE_LITECOIN = 2;
+uint256 constant COIN_TYPE_DOGECOIN = 3;
+```
+
+### EVM Chain Coin Types (ENSIP-19)
+
+For EVM-compatible chains, use: `0x80000000 | (0x80000000 << 31) | chainId`
+
+```solidity
+// EVM chain examples
+uint256 ethereumCoinType = 60;                    // Special case
+uint256 optimismCoinType = 0x8000000000000000a;   // Chain ID 10
+uint256 arbitrumCoinType = 0x80000000000000a4b1; // Chain ID 42161  
+uint256 lineaCoinType = 0x800000000000e39990;    // Chain ID 59144
+```
+
+**Context Format**: `a[e<chainId>]=<address>`
+
+**Default EVM**: `a[e0]=<address>` - Used as fallback for any EVM chain without a specific address
+
+## Related Contracts
+
+- **DNSTXTParserLib**: Parser library for TXT record context
+- **IExtendedDNSResolver**: Extended DNS resolver interface
+- **DNSTLDResolver**: DNSSEC TLD resolver that uses this contract
+- **ENSIP19**: EVM chain coin type utilities

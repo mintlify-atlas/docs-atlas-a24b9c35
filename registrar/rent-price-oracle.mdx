@@ -1,0 +1,796 @@
+---
+title: "StandardRentPriceOracle"
+description: "Configurable pricing oracle for .eth name registrations with length-based pricing, discounts, and premium decay"
+---
+
+## Overview
+
+The `StandardRentPriceOracle` contract calculates registration and renewal prices for `.eth` domain names. It implements sophisticated pricing mechanisms including length-based base rates, time-based discounts for longer registrations, and a decaying premium for recently expired names.
+
+<Info>
+This oracle supports multiple payment tokens with configurable exchange rates, allowing users to pay in USDC, DAI, or other ERC-20 tokens.
+</Info>
+
+## Key Features
+
+- **Length-based pricing**: Shorter names cost more per second
+- **Multi-year discounts**: Save money on longer registrations
+- **Premium decay**: Recently expired names have a temporary premium that decreases over time
+- **Multi-token support**: Accept payments in multiple ERC-20 tokens
+- **Flexible configuration**: Owner can update all pricing parameters
+
+## Contract Architecture
+
+```solidity
+contract StandardRentPriceOracle is ERC165, Ownable, IRentPriceOracle
+```
+
+### Configuration Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `REGISTRY` | `IPermissionedRegistry` | Registry to check name status |
+| `baseRatePerCp` | `uint256[]` | Base rates per codepoint |
+| `discountPoints` | `DiscountPoint[]` | Discount schedule for longer registrations |
+| `premiumPriceInitial` | `uint256` | Starting premium for expired names |
+| `premiumHalvingPeriod` | `uint64` | Time for premium to halve |
+| `premiumPeriod` | `uint64` | Time until premium reaches zero |
+
+## Pricing Components
+
+### Base Price Calculation
+
+The base price is calculated from the name length (in codepoints) and duration:
+
+```solidity
+function baseRate(string memory label) public view returns (uint256)
+```
+
+<AccordionGroup>
+  <Accordion title="Length-based Rates">
+    Names are priced by their Unicode codepoint count:
+    
+    - 1-2 characters: Often disabled or very expensive
+    - 3 characters: $640/year (in base units)
+    - 4 characters: $160/year
+    - 5+ characters: $5/year
+    
+    ```javascript ethers.js
+    // Get base rate (base units per second)
+    const rate3char = await oracle.baseRate('abc');
+    const rate4char = await oracle.baseRate('abcd');
+    const rate5char = await oracle.baseRate('vitalik');
+    
+    // Calculate annual cost in base units
+    const SECONDS_PER_YEAR = 31557600;
+    const annualCost = rate3char * BigInt(SECONDS_PER_YEAR);
+    ```
+  </Accordion>
+  
+  <Accordion title="Codepoint vs Bytes">
+    Pricing uses Unicode codepoint length, not byte length:
+    
+    ```javascript ethers.js
+    // These have different byte lengths but same codepoint length
+    await oracle.baseRate('abc');     // 3 codepoints, 3 bytes
+    await oracle.baseRate('日本語');   // 3 codepoints, 9 bytes
+    // Both return the same rate
+    ```
+    
+    The contract uses `StringUtils.strlen()` for codepoint counting.
+  </Accordion>
+</AccordionGroup>
+
+### Multi-Year Discounts
+
+Longer registrations receive increasing discounts through a piecewise linear discount function:
+
+```solidity
+function integratedDiscount(uint64 duration) public view returns (uint256)
+```
+
+<Tabs>
+  <Tab title="Discount Schedule">
+    Default discount schedule:
+    
+    | Registration Period | Incremental Discount | Average Total Discount |
+    |---------------------|---------------------|------------------------|
+    | Year 1 | 0% | 0% |
+    | Year 2 | 10% | 5% |
+    | Year 3 | 20% | 10% |
+    | Years 4-5 | 28.75% | 17.5% |
+    | Years 6-10 | 32.5% | 25% |
+    | Years 11-25 | 33.33% | 30% |
+    
+    ```javascript ethers.js
+    // Compare costs for different durations
+    const oneYear = 31557600;
+    
+    const price1y = await oracle.rentPrice('vitalik', owner, oneYear, usdc);
+    const price2y = await oracle.rentPrice('vitalik', owner, oneYear * 2, usdc);
+    const price5y = await oracle.rentPrice('vitalik', owner, oneYear * 5, usdc);
+    
+    // 5-year registration costs less than 5x the 1-year price
+    console.log('1 year:', ethers.formatUnits(price1y.base, 6), 'USDC');
+    console.log('5 years:', ethers.formatUnits(price5y.base, 6), 'USDC');
+    console.log('Savings:', ((1 - price5y.base / (price1y.base * 5n)) * 100).toFixed(1), '%');
+    ```
+  </Tab>
+  
+  <Tab title="Discount Calculation">
+    The discount is calculated as a weighted average over time intervals:
+    
+    ```solidity
+    struct DiscountPoint {
+        uint64 t;       // Time interval duration
+        uint128 value;  // Discount for this interval (relative to type(uint128).max)
+    }
+    ```
+    
+    Example for 2-year registration:
+    - Year 1: 0% discount
+    - Year 2: 10% discount
+    - Average: 5% discount
+    
+    The final discount is:
+    ```
+    discount = integratedDiscount(duration) / (duration * type(uint128).max)
+    ```
+  </Tab>
+</Tabs>
+
+### Premium Decay
+
+When a name expires, a premium price is temporarily applied that decays exponentially over time:
+
+```solidity
+function premiumPriceAfter(uint64 duration) public view returns (uint256)
+```
+
+<CodeGroup>
+
+```javascript Calculation
+// Premium uses exponential decay with halving
+// Formula: P(t) = P₀ × 2^(-t / h) - P₀ × 2^(-period / h)
+// where:
+//   P₀ = initial premium (e.g., $100M)
+//   h = halving period (e.g., 1 day)
+//   t = time since expiry
+//   period = total premium period (e.g., 21 days)
+
+// Check premium at different times after expiry
+const labelId = ethers.id('vitalik');
+const state = await registry.getState(labelId);
+const expiry = state.expiry;
+
+// Immediately after expiry
+const premium0 = await oracle.premiumPrice(expiry);
+
+// After 1 day (one halving period)
+const premium1d = await oracle.premiumPriceAfter(86400);
+
+// After 21 days (end of premium period)
+const premium21d = await oracle.premiumPriceAfter(21 * 86400);
+
+console.log('At expiry:', ethers.formatUnits(premium0, 12));
+console.log('After 1 day:', ethers.formatUnits(premium1d, 12), '(~50% of initial)');
+console.log('After 21 days:', ethers.formatUnits(premium21d, 12), '(should be 0)');
+```
+
+```solidity Solidity
+// Get current premium for an expired name
+IPermissionedRegistry.State memory state = registry.getState(labelId);
+uint256 premium = oracle.premiumPrice(state.expiry);
+
+if (block.timestamp >= state.expiry) {
+    uint64 elapsed = uint64(block.timestamp) - state.expiry;
+    // Premium decays over time
+    // After premiumPeriod (e.g., 21 days), premium is 0
+}
+```
+
+</CodeGroup>
+
+<Note>
+The premium only applies to new owners. The previous owner can re-register without paying the premium.
+</Note>
+
+## Price Calculation
+
+Get the complete price for a registration:
+
+```solidity
+function rentPrice(
+    string memory label,
+    address owner,
+    uint64 duration,
+    IERC20 paymentToken
+) public view returns (uint256 base, uint256 premium)
+```
+
+### Complete Example
+
+```javascript ethers.js
+import { ethers } from 'ethers';
+
+async function calculateRegistrationCost(oracle, registry, label, owner, duration, paymentToken) {
+  // Get pricing
+  const price = await oracle.rentPrice(label, owner, duration, paymentToken);
+  
+  // Get token decimals
+  const token = new ethers.Contract(paymentToken, [
+    'function decimals() view returns (uint8)',
+    'function symbol() view returns (string)'
+  ], provider);
+  const decimals = await token.decimals();
+  const symbol = await token.symbol();
+  
+  // Format prices
+  const baseFormatted = ethers.formatUnits(price.base, decimals);
+  const premiumFormatted = ethers.formatUnits(price.premium, decimals);
+  const totalFormatted = ethers.formatUnits(price.base + price.premium, decimals);
+  
+  console.log(`Registration cost for ${label}.eth:`);
+  console.log(`  Base price: ${baseFormatted} ${symbol}`);
+  console.log(`  Premium: ${premiumFormatted} ${symbol}`);
+  console.log(`  Total: ${totalFormatted} ${symbol}`);
+  
+  return {
+    base: price.base,
+    premium: price.premium,
+    total: price.base + price.premium,
+    token: symbol
+  };
+}
+
+// Usage
+const SECONDS_PER_YEAR = 31557600;
+const cost = await calculateRegistrationCost(
+  oracle,
+  registry,
+  'vitalik',
+  await signer.getAddress(),
+  SECONDS_PER_YEAR, // 1 year
+  usdcAddress
+);
+```
+
+### Price Components Breakdown
+
+```javascript ethers.js
+async function analyzePricing(oracle, label, duration) {
+  const SECONDS_PER_YEAR = 31557600;
+  
+  // Get base rate per second
+  const ratePerSecond = await oracle.baseRate(label);
+  console.log('Rate per second:', ratePerSecond.toString());
+  
+  // Calculate undiscounted price
+  const undiscounted = ratePerSecond * BigInt(duration);
+  console.log('Undiscounted price:', undiscounted.toString());
+  
+  // Get discount
+  const discount = await oracle.integratedDiscount(duration);
+  const avgDiscount = discount / BigInt(duration);
+  const discountPercent = Number(avgDiscount * 10000n / BigInt(2n ** 128n)) / 100;
+  console.log('Average discount:', discountPercent.toFixed(2), '%');
+  
+  // Get final price
+  const price = await oracle.rentPrice(label, ethers.ZeroAddress, duration, usdc);
+  console.log('Final base price:', price.base.toString());
+  console.log('Savings:', ((1 - Number(price.base) / Number(undiscounted)) * 100).toFixed(2), '%');
+}
+
+await analyzePricing(oracle, 'vitalik', SECONDS_PER_YEAR * 5);
+```
+
+## Payment Tokens
+
+### Check Token Support
+
+```solidity
+function isPaymentToken(IERC20 paymentToken) public view returns (bool)
+```
+
+```javascript ethers.js
+const acceptsUSDC = await oracle.isPaymentToken(usdcAddress);
+const acceptsDAI = await oracle.isPaymentToken(daiAddress);
+const acceptsWETH = await oracle.isPaymentToken(wethAddress);
+
+if (acceptsUSDC) {
+  console.log('Can pay with USDC');
+}
+```
+
+### Exchange Rates
+
+Payment tokens are configured with exchange rates relative to the base pricing units:
+
+```solidity
+struct PaymentRatio {
+    IERC20 token;
+    uint128 numer;   // Numerator
+    uint128 denom;   // Denominator
+}
+```
+
+<Tip>
+For stablecoins like USDC (6 decimals) with base pricing in 12 decimals:
+```
+numer = 10^(6-12) = 10^-6 → numer = 1, denom = 10^6
+```
+
+For tokens like DAI (18 decimals):
+```
+numer = 10^(18-12) = 10^6 → numer = 10^6, denom = 1
+```
+</Tip>
+
+## Name Validation
+
+Check if a name meets length requirements:
+
+```solidity
+function isValid(string calldata label) external view returns (bool)
+```
+
+```javascript ethers.js
+// Check various name lengths
+const valid1 = await oracle.isValid('');        // false - empty
+const valid2 = await oracle.isValid('ab');      // false - too short (if 1-2 char disabled)
+const valid3 = await oracle.isValid('abc');     // true - 3 chars enabled
+const valid4 = await oracle.isValid('vitalik'); // true - 5+ chars enabled
+```
+
+<Info>
+A name is valid if `baseRate(label) > 0`. The oracle owner can disable specific lengths by setting their rate to 0.
+</Info>
+
+## Administrative Functions
+
+Only the contract owner can update pricing parameters.
+
+### Update Base Rates
+
+Change the per-second pricing for different name lengths:
+
+```solidity
+function updateBaseRates(uint256[] calldata ratePerCp) external onlyOwner
+```
+
+```solidity Example
+// Configure pricing
+// ratePerCp[0] = 1 codepoint rate
+// ratePerCp[1] = 2 codepoint rate
+// ratePerCp[2] = 3 codepoint rate, etc.
+// Names longer than array length use the last rate
+
+uint256[] memory rates = new uint256[](5);
+rates[0] = 0;                           // 1-char disabled
+rates[1] = 0;                           // 2-char disabled  
+rates[2] = 640e12 / 365.25 days;       // 3-char: $640/year
+rates[3] = 160e12 / 365.25 days;       // 4-char: $160/year
+rates[4] = 5e12 / 365.25 days;         // 5+char: $5/year
+
+oracle.updateBaseRates(rates);
+```
+
+<Warning>
+Setting a rate to 0 disables that length. Use an empty array to disable all registrations.
+</Warning>
+
+### Update Discount Schedule
+
+Modify the multi-year discount structure:
+
+```solidity
+function updateDiscountPoints(DiscountPoint[] calldata points) external onlyOwner
+```
+
+```solidity Example
+// Create discount schedule
+// Each point is (duration, discount relative to type(uint128).max)
+
+DiscountPoint[] memory points = new DiscountPoint[](3);
+
+// Year 1: 0% discount
+points[0] = DiscountPoint({
+    t: 365.25 days,
+    value: 0
+});
+
+// Year 2: 10% discount
+// 10% = type(uint128).max / 10
+points[1] = DiscountPoint({
+    t: 365.25 days,
+    value: uint128(type(uint128).max / 10)
+});
+
+// Year 3: 20% discount
+points[2] = DiscountPoint({
+    t: 365.25 days,
+    value: uint128(type(uint128).max / 5)
+});
+
+oracle.updateDiscountPoints(points);
+```
+
+<Accordion title="Calculating Incremental Discounts">
+To achieve a target average discount, calculate the incremental discount:
+
+```
+Target: 2 years at 5% average discount
+Year 1: 0% discount
+Year 2: x% discount
+
+Solve: (0% + x%) / 2 = 5%
+       x% = 10%
+```
+
+So year 2 should have a 10% incremental discount to achieve 5% average.
+</Accordion>
+
+### Update Premium Pricing
+
+Configure the premium decay function:
+
+```solidity
+function updatePremiumPricing(
+    uint256 initialPrice,
+    uint64 halvingPeriod,
+    uint64 period
+) external onlyOwner
+```
+
+```solidity Example
+// Configure exponential decay premium
+oracle.updatePremiumPricing(
+    100_000_000e12,  // Initial: $100M in base units
+    1 days,          // Halves every day
+    21 days          // Reaches 0 after 21 days
+);
+
+// Disable premium
+oracle.updatePremiumPricing(0, 0, 0);
+```
+
+<Note>
+The premium decay formula is:
+```
+P(t) = P₀ × 2^(-t/h) - P₀ × 2^(-period/h)
+```
+where `P₀` is initial price, `h` is halving period, and `t` is time since expiry.
+</Note>
+
+### Manage Payment Tokens
+
+Add, update, or remove accepted payment tokens:
+
+```solidity
+function updatePaymentToken(
+    IERC20 paymentToken,
+    uint128 numer,
+    uint128 denom
+) external onlyOwner
+```
+
+```solidity Example
+// Add USDC (6 decimals)
+// Convert base units (12 decimals) to USDC (6 decimals)
+// Price in USDC = base units / 10^6
+oracle.updatePaymentToken(
+    IERC20(usdcAddress),
+    1,      // numerator
+    10**6   // denominator
+);
+
+// Add DAI (18 decimals)  
+// Price in DAI = base units * 10^6
+oracle.updatePaymentToken(
+    IERC20(daiAddress),
+    10**6,  // numerator
+    1       // denominator
+);
+
+// Remove a token
+oracle.updatePaymentToken(
+    IERC20(tokenAddress),
+    0,   // numer (any value)
+    0    // denom = 0 removes token
+);
+```
+
+## View Functions
+
+### Get Current Configuration
+
+```solidity
+function getBaseRates() external view returns (uint256[] memory)
+function getDiscountPoints() external view returns (DiscountPoint[] memory)
+```
+
+```javascript ethers.js
+// Get current base rates
+const rates = await oracle.getBaseRates();
+const SECONDS_PER_YEAR = 31557600;
+
+rates.forEach((rate, index) => {
+  const annualCost = Number(rate * BigInt(SECONDS_PER_YEAR)) / 1e12;
+  console.log(`${index + 1} char: $${annualCost}/year`);
+});
+
+// Get discount schedule
+const discounts = await oracle.getDiscountPoints();
+let totalTime = 0n;
+
+discounts.forEach((point, index) => {
+  totalTime += point.t;
+  const discountPercent = Number(point.value * 10000n / BigInt(2n ** 128n)) / 100;
+  console.log(`Interval ${index + 1}: ${Number(point.t) / 86400} days, ${discountPercent.toFixed(2)}% discount`);
+});
+```
+
+## Events
+
+### DiscountPointsChanged
+
+```solidity
+event DiscountPointsChanged(DiscountPoint[] points);
+```
+
+Emitted when the discount schedule is updated.
+
+### BaseRatesChanged
+
+```solidity
+event BaseRatesChanged(uint256[] ratePerCp);
+```
+
+Emitted when base rates are updated.
+
+### PremiumPricingChanged
+
+```solidity
+event PremiumPricingChanged(
+    uint256 indexed initialPrice,
+    uint64 indexed halvingPeriod,
+    uint64 indexed period
+);
+```
+
+Emitted when premium pricing parameters are updated.
+
+### PaymentTokenAdded / PaymentTokenRemoved
+
+```solidity
+event PaymentTokenAdded(IERC20 indexed paymentToken);
+event PaymentTokenRemoved(IERC20 indexed paymentToken);
+```
+
+Emitted when payment token support changes.
+
+## Error Handling
+
+<AccordionGroup>
+  <Accordion title="NotValid">
+    ```solidity
+    error NotValid(string label);
+    ```
+    
+    The label does not meet length requirements or has a base rate of 0.
+    
+    ```javascript ethers.js
+    try {
+      await oracle.rentPrice('ab', owner, duration, usdc);
+    } catch (error) {
+      if (error.message.includes('NotValid')) {
+        console.log('Name length not allowed');
+      }
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="PaymentTokenNotSupported">
+    ```solidity
+    error PaymentTokenNotSupported(IERC20 paymentToken);
+    ```
+    
+    The specified payment token is not accepted.
+    
+    ```javascript ethers.js
+    // Check before calling rentPrice
+    if (!await oracle.isPaymentToken(tokenAddress)) {
+      throw new Error('Payment token not supported');
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="InvalidRatio">
+    ```solidity
+    error InvalidRatio();
+    ```
+    
+    Payment token configuration has invalid numerator (must be > 0 if denom > 0).
+  </Accordion>
+  
+  <Accordion title="InvalidDiscountPoint">
+    ```solidity
+    error InvalidDiscountPoint();
+    ```
+    
+    Discount point has zero duration (not allowed).
+  </Accordion>
+</AccordionGroup>
+
+## Advanced Usage
+
+### Compare Payment Options
+
+```javascript ethers.js
+async function comparePaymentOptions(oracle, label, owner, duration) {
+  const tokens = [
+    { address: usdcAddress, symbol: 'USDC', decimals: 6 },
+    { address: daiAddress, symbol: 'DAI', decimals: 18 }
+  ];
+  
+  console.log(`Pricing for ${label}.eth (${duration / 31557600} years):\n`);
+  
+  for (const token of tokens) {
+    const isSupported = await oracle.isPaymentToken(token.address);
+    if (!isSupported) {
+      console.log(`${token.symbol}: Not supported`);
+      continue;
+    }
+    
+    try {
+      const price = await oracle.rentPrice(label, owner, duration, token.address);
+      const total = ethers.formatUnits(price.base + price.premium, token.decimals);
+      console.log(`${token.symbol}: ${total}`);
+    } catch (error) {
+      console.log(`${token.symbol}: Error - ${error.message}`);
+    }
+  }
+}
+
+await comparePaymentOptions(oracle, 'vitalik', ownerAddress, 31557600 * 5);
+```
+
+### Calculate Break-even Point
+
+```javascript ethers.js
+async function findBreakEvenYears(oracle, label) {
+  const YEAR = 31557600;
+  const owner = ethers.ZeroAddress; // Exclude premium
+  
+  // Compare single year repeated vs multi-year
+  const oneYearPrice = await oracle.rentPrice(label, owner, YEAR, usdc);
+  
+  console.log('Multi-year savings:\n');
+  
+  for (let years = 1; years <= 10; years++) {
+    const multiYearPrice = await oracle.rentPrice(label, owner, YEAR * years, usdc);
+    const repeatedPrice = oneYearPrice.base * BigInt(years);
+    const savings = repeatedPrice - multiYearPrice.base;
+    const savingsPercent = Number(savings * 10000n / repeatedPrice) / 100;
+    
+    console.log(`${years} year(s): Save ${ethers.formatUnits(savings, 6)} USDC (${savingsPercent.toFixed(2)}%)`);
+  }
+}
+
+await findBreakEvenYears(oracle, 'vitalik');
+```
+
+### Monitor Premium Decay
+
+```javascript ethers.js
+async function trackPremiumDecay(oracle, registry, label) {
+  const labelId = ethers.id(label);
+  const state = await registry.getState(labelId);
+  
+  if (state.expiry > await provider.getBlock('latest').then(b => b.timestamp)) {
+    console.log('Name has not expired yet');
+    return;
+  }
+  
+  const halvingPeriod = await oracle.premiumHalvingPeriod();
+  const premiumPeriod = await oracle.premiumPeriod();
+  
+  console.log(`Premium decay schedule for ${label}.eth:\n`);
+  
+  for (let days = 0; days <= 21; days++) {
+    const duration = days * 86400;
+    if (duration > premiumPeriod) break;
+    
+    const premium = await oracle.premiumPriceAfter(duration);
+    const premiumUSD = Number(ethers.formatUnits(premium, 12));
+    
+    console.log(`Day ${days}: $${premiumUSD.toLocaleString()}`);
+  }
+}
+
+await trackPremiumDecay(oracle, registry, 'vitalik');
+```
+
+## Integration Example
+
+Complete integration showing price calculation and display:
+
+```javascript ethers.js
+import { ethers } from 'ethers';
+
+class ENSPricingCalculator {
+  constructor(oracle, registry, usdc) {
+    this.oracle = oracle;
+    this.registry = registry;
+    this.usdc = usdc;
+  }
+  
+  async getDetailedPricing(label, owner, durationYears) {
+    const YEAR = 31557600;
+    const duration = YEAR * durationYears;
+    
+    // Check if valid
+    const isValid = await this.oracle.isValid(label);
+    if (!isValid) {
+      throw new Error(`Name "${label}" does not meet length requirements`);
+    }
+    
+    // Get pricing components
+    const price = await this.oracle.rentPrice(label, owner, duration, this.usdc);
+    const baseRate = await this.oracle.baseRate(label);
+    
+    // Calculate discount
+    const undiscountedBase = baseRate * BigInt(duration);
+    const discountAmount = undiscountedBase - price.base;
+    const discountPercent = Number(discountAmount * 10000n / undiscountedBase) / 100;
+    
+    // Check if premium applies
+    const labelId = ethers.id(label);
+    const state = await this.registry.getState(labelId);
+    const isPremium = price.premium > 0;
+    
+    return {
+      label: `${label}.eth`,
+      duration: `${durationYears} year(s)`,
+      basePrice: ethers.formatUnits(price.base, 6) + ' USDC',
+      premium: isPremium ? ethers.formatUnits(price.premium, 6) + ' USDC' : 'None',
+      total: ethers.formatUnits(price.base + price.premium, 6) + ' USDC',
+      discount: discountPercent.toFixed(2) + '%',
+      savings: ethers.formatUnits(discountAmount, 6) + ' USDC',
+      expiry: state.expiry,
+      isPremium
+    };
+  }
+  
+  async displayPricing(label, owner, durationYears) {
+    const details = await this.getDetailedPricing(label, owner, durationYears);
+    
+    console.log(`\nPricing for ${details.label}`);
+    console.log('─'.repeat(50));
+    console.log(`Duration:     ${details.duration}`);
+    console.log(`Base Price:   ${details.basePrice}`);
+    if (details.isPremium) {
+      console.log(`Premium:      ${details.premium}`);
+    }
+    console.log(`Discount:     ${details.discount} (saves ${details.savings})`);
+    console.log(`Total Cost:   ${details.total}`);
+    console.log('─'.repeat(50));
+    
+    return details;
+  }
+}
+
+// Usage
+const calculator = new ENSPricingCalculator(oracle, registry, usdcAddress);
+await calculator.displayPricing('vitalik', ownerAddress, 5);
+```
+
+## Source Code
+
+<Card title="StandardRentPriceOracle.sol" icon="github" href="https://github.com/ensdomains/contracts-v2/blob/main/contracts/src/registrar/StandardRentPriceOracle.sol">
+  View the complete oracle implementation
+</Card>
+
+<Card title="LibHalving.sol" icon="github" href="https://github.com/ensdomains/contracts-v2/blob/main/contracts/src/registrar/libraries/LibHalving.sol">
+  View the premium decay calculation library
+</Card>

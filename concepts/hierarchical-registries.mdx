@@ -1,0 +1,554 @@
+---
+title: "Hierarchical Registries"
+description: "Deep dive into ENS v2's hierarchical registry system and how registries manage subdomains"
+---
+
+## Understanding the Registry Hierarchy
+
+In ENS v2, each name can have its own dedicated registry contract that manages its direct subdomains. This creates a tree structure that mirrors the DNS hierarchy, enabling unprecedented flexibility in ownership models and access control.
+
+<Info>
+  **Core Principle**: A registry is responsible for exactly **one name** and **all of its direct children**. It has no knowledge of or control over its grandchildren or deeper descendants.
+</Info>
+
+## Registry Responsibility Scope
+
+### What a Registry Controls
+
+Each registry contract manages:
+
+1. **Direct Subdomains Only**: Registration, ownership, and expiry of immediate children
+2. **Subdomain Metadata**: Resolver addresses and subregistry pointers for children
+3. **Access Permissions**: Role-based permissions for subdomain operations
+4. **NFT Ownership**: ERC1155 tokens representing subdomain ownership
+
+**Example**: The registry for `example.eth` controls:
+- ✅ `sub.example.eth`
+- ✅ `www.example.eth`
+- ❌ `deep.sub.example.eth` (controlled by `sub.example.eth`'s registry)
+
+### Registry Boundaries
+
+```solidity
+// The .eth registry
+IRegistry ethRegistry = rootRegistry.getSubregistry("eth");
+
+// It can register vitalik.eth
+ethRegistry.register("vitalik", owner, subregistry, resolver, roles, expiry);
+
+// But it has NO control over sub.vitalik.eth
+// That's controlled by vitalik.eth's subregistry
+```
+
+## The Registry Tree Structure
+
+### Hierarchical Organization
+
+```
+                    Root Registry ("")
+                    |
+         +----------+----------+
+         |                    |
+    .eth Registry        .box Registry
+         |
+    +----+----+
+    |         |
+vitalik   nick       
+  Registry  Registry
+    |         |
+  sub     www
+```
+
+Each node in this tree:
+- Is represented by a registry contract (or null if no subregistry exists)
+- Implements the `IRegistry` interface
+- Maintains its own storage for direct children
+- Can have a completely different implementation from its parent
+
+### Traversal Example
+
+Resolving `sub.vitalik.eth` involves:
+
+```solidity
+// Start at root
+IRegistry current = rootRegistry;
+
+// Traverse to .eth
+current = current.getSubregistry("eth");  // Returns .eth registry
+
+// Traverse to vitalik.eth
+current = current.getSubregistry("vitalik");  // Returns vitalik registry
+
+// Get resolver for sub.vitalik.eth
+address resolver = current.getResolver("sub");  // Returns resolver or address(0)
+```
+
+**Reference**: [`LibRegistry.sol:19-47`](/home/daytona/workspace/source/contracts/src/universalResolver/libraries/LibRegistry.sol#L19-L47)
+
+## Registry Lifecycle
+
+### Creating a Subregistry
+
+When you register a name, you can optionally specify a subregistry:
+
+<CodeGroup>
+
+```solidity Simple Registration
+// Register without a subregistry
+// sub.example.eth cannot have children
+registry.register(
+    "sub",           // label
+    owner,           // owner address
+    IRegistry(address(0)),  // no subregistry
+    resolver,        // resolver address
+    roles,           // initial roles
+    expiry           // expiration time
+);
+```
+
+```solidity With Subregistry
+// Create a registry for the subdomain
+PermissionedRegistry subRegistry = new PermissionedRegistry(
+    hcaFactory,
+    metadata,
+    subdomainOwner,
+    ROLE_REGISTRAR_ADMIN
+);
+
+// Register with subregistry
+// Now sub.example.eth CAN have children
+registry.register(
+    "sub",
+    owner,
+    subRegistry,     // subregistry for managing deeper levels
+    resolver,
+    roles,
+    expiry
+);
+```
+
+</CodeGroup>
+
+### Setting the Parent Relationship
+
+Registries maintain a reference to their canonical parent:
+
+```solidity
+// The subregistry should know its parent location
+subRegistry.setParent(parentRegistry, "sub");
+
+// Now it can report its canonical name
+(IRegistry parent, string memory label) = subRegistry.getParent();
+// parent = parentRegistry
+// label = "sub"
+```
+
+This enables:
+- Canonical name construction
+- Verification that a registry is properly configured
+- Walking up the tree to the root
+
+**Reference**: [`IRegistry.sol:68-72`](/home/daytona/workspace/source/contracts/src/registry/interfaces/IRegistry.sol#L68-L72)
+
+## Registry Patterns
+
+### 1. Infinite Nesting
+
+Create unlimited subdomain depth by chaining registries:
+
+```solidity
+// Level 1: example.eth has a registry
+IRegistry level1 = new PermissionedRegistry(...);
+ethRegistry.register("example", owner1, level1, resolver1, roles1, expiry1);
+
+// Level 2: sub.example.eth has a registry
+IRegistry level2 = new PermissionedRegistry(...);
+level1.register("sub", owner2, level2, resolver2, roles2, expiry2);
+
+// Level 3: deep.sub.example.eth has a registry
+IRegistry level3 = new PermissionedRegistry(...);
+level2.register("deep", owner3, level3, resolver3, roles3, expiry3);
+
+// And so on...
+```
+
+### 2. Different Registry Types
+
+Each level can use a different registry implementation:
+
+```solidity
+// .eth uses PermissionedRegistry with expiry
+PermissionedRegistry ethRegistry = new PermissionedRegistry(...);
+
+// vitalik.eth uses a custom registry with different rules
+CustomRegistry customRegistry = new CustomRegistry(...);
+ethRegistry.register("vitalik", owner, customRegistry, resolver, roles, expiry);
+
+// As long as it implements IRegistry, it works!
+```
+
+### 3. Wildcard Resolution via No Subregistry
+
+If a name has a resolver but no subregistry, the resolver can handle all subdomains:
+
+```solidity
+// Register example.eth with resolver but NO subregistry
+ethRegistry.register(
+    "example",
+    owner,
+    IRegistry(address(0)),  // No subregistry
+    wildcardResolver,       // This resolver handles *.example.eth
+    roles,
+    expiry
+);
+
+// Now ANY subdomain of example.eth will use wildcardResolver
+// - sub.example.eth → wildcardResolver
+// - www.example.eth → wildcardResolver
+// - anything.example.eth → wildcardResolver
+```
+
+<Tip>
+  This pattern is extremely powerful for:
+  - IPFS gateways (`{cid}.ipfs.eth` → IPFS resolver)
+  - Decentralized websites (`*.myapp.eth` → app resolver)
+  - Dynamic subdomains without gas costs per subdomain
+</Tip>
+
+## Registry Discovery
+
+### Finding Registries in the Hierarchy
+
+The `UniversalResolverV2` provides helper functions for registry discovery:
+
+<CodeGroup>
+
+```solidity Find Canonical Registry
+// Get the registry for a name (if it's canonical)
+IRegistry registry = universalResolver.findCanonicalRegistry(
+    dnsEncode("vitalik.eth")
+);
+
+// Returns null if:
+// - Registry doesn't exist
+// - Registry's parent doesn't point to it
+// - Registry's getParent() doesn't match
+```
+
+```solidity Find All Registries
+// Get all registries in the ancestry chain
+IRegistry[] memory registries = universalResolver.findRegistries(
+    dnsEncode("sub.vitalik.eth")
+);
+
+// Returns: [<sub registry or null>, <vitalik registry>, <eth registry>, <root>]
+// Array is in label-order (leftmost = deepest)
+```
+
+```solidity Construct Canonical Name
+// Get the canonical name for a registry
+bytes memory name = universalResolver.findCanonicalName(registry);
+
+// Returns DNS-encoded name or empty bytes if not canonical
+```
+
+</CodeGroup>
+
+**Reference**: [`UniversalResolverV2.sol:21-50`](/home/daytona/workspace/source/contracts/src/universalResolver/UniversalResolverV2.sol#L21-L50)
+
+## Registry States
+
+A position in the hierarchy can be in different states:
+
+### 1. Non-Existent
+
+```solidity
+IRegistry sub = parentRegistry.getSubregistry("nonexistent");
+// sub == IRegistry(address(0))
+// No one has registered this name yet
+```
+
+### 2. Registered Without Subregistry
+
+```solidity
+IRegistry sub = parentRegistry.getSubregistry("exists");
+// sub == IRegistry(address(0))
+
+address resolver = parentRegistry.getResolver("exists");
+// resolver != address(0)
+// Name exists but has no subregistry (leaf node)
+```
+
+### 3. Registered With Subregistry
+
+```solidity
+IRegistry sub = parentRegistry.getSubregistry("exists");
+// sub != IRegistry(address(0))
+// Name exists and can have children
+```
+
+### 4. Expired
+
+```solidity
+// Name was registered but expired
+IRegistry sub = parentRegistry.getSubregistry("expired");
+// sub == IRegistry(address(0))  (treated as non-existent)
+
+uint64 expiry = parentRegistry.getExpiry(tokenId);
+// expiry < block.timestamp
+```
+
+**Reference**: [`PermissionedRegistry.sol:257-260`](/home/daytona/workspace/source/contracts/src/registry/PermissionedRegistry.sol#L257-L260)
+
+## Advanced: Emancipated Subdomains
+
+Create subdomains that the parent owner cannot control:
+
+<Steps>
+  <Step title="Create Restricted Subregistry">
+    Deploy a registry where the owner has **no root-level roles**:
+    
+    ```solidity
+    PermissionedRegistry emancipatedRegistry = new PermissionedRegistry(
+        hcaFactory,
+        metadata,
+        subdomainOwner,
+        0  // No root-level admin roles!
+    );
+    ```
+  </Step>
+  
+  <Step title="Lock the Subregistry Pointer">
+    Set the subregistry and revoke the ability to change it:
+    
+    ```solidity
+    // Set the subregistry
+    parentRegistry.setSubregistry(tokenId, emancipatedRegistry);
+    
+    // Revoke the role to change it
+    parentRegistry.revokeRoles(
+        tokenId,
+        ROLE_SET_SUBREGISTRY,
+        parentOwner
+    );
+    ```
+  </Step>
+  
+  <Step title="Result: True Emancipation">
+    The parent owner now **cannot**:
+    - Change the subregistry pointer
+    - Interfere with subdomain registrations
+    - Modify subdomain permissions
+    
+    But they still own the parent name itself.
+  </Step>
+</Steps>
+
+<Warning>
+  **Careful!** Emancipated names are permanent. Once you revoke `ROLE_SET_SUBREGISTRY`, you cannot undo it unless you also retained that role at the root level.
+</Warning>
+
+## Canonical vs Non-Canonical Registries
+
+### Canonical Registry
+
+A registry is **canonical** for a name if:
+
+1. Its parent's `getSubregistry(label)` points to it
+2. Its `getParent()` returns the correct parent and label
+3. This relationship holds true all the way to the root
+
+```solidity
+// Check if a registry is canonical
+function isCanonical(IRegistry rootRegistry, IRegistry registry) 
+    public view returns (bool) 
+{
+    bytes memory constructedName = LibRegistry.findCanonicalName(
+        rootRegistry, 
+        registry
+    );
+    return constructedName.length > 0;
+}
+```
+
+### Non-Canonical Registry
+
+A registry becomes non-canonical if:
+
+- The parent changes the subregistry pointer
+- The registry's parent reference is incorrect
+- The chain to root is broken
+
+```solidity
+// Original registry
+IRegistry oldRegistry = parentRegistry.getSubregistry("sub");
+
+// Parent changes the pointer
+parentRegistry.setSubregistry(tokenId, newRegistry);
+
+// oldRegistry is now non-canonical
+// It still exists but is disconnected from the hierarchy
+```
+
+**Reference**: [`LibRegistry.sol:97-119`](/home/daytona/workspace/source/contracts/src/universalResolver/libraries/LibRegistry.sol#L97-L119)
+
+## Gas Optimization Strategies
+
+### Shared Registries
+
+Multiple names can share the same registry implementation:
+
+```solidity
+// Deploy one registry contract
+PermissionedRegistry sharedRegistry = new PermissionedRegistry(...);
+
+// Use it for multiple names
+ethRegistry.register("alice", owner1, sharedRegistry, resolver1, roles1, expiry1);
+ethRegistry.register("bob", owner2, sharedRegistry, resolver2, roles2, expiry2);
+
+// ⚠️ WARNING: This is usually NOT what you want!
+// Both names would share the same subdomain namespace
+```
+
+### On-Demand Registry Creation
+
+Only create subregistries when needed:
+
+```solidity
+// Initially register without subregistry
+registry.register("name", owner, IRegistry(address(0)), resolver, roles, expiry);
+
+// Later, if subdomains are needed:
+IRegistry newSubregistry = new PermissionedRegistry(...);
+registry.setSubregistry(tokenId, newSubregistry);
+```
+
+### Registry Factories
+
+Use factory patterns for deterministic addresses:
+
+```solidity
+interface IRegistryFactory {
+    function createRegistry(
+        address owner,
+        uint256 roles
+    ) external returns (IRegistry);
+}
+
+// Predictable registry creation
+IRegistry registry = factory.createRegistry(owner, roles);
+```
+
+## Integration Examples
+
+### Walking Up the Tree
+
+```solidity
+function getFullPath(IRegistry registry, IRegistry root) 
+    public view returns (string[] memory) 
+{
+    string[] memory labels = new string[](10);  // Max depth
+    uint256 count = 0;
+    
+    IRegistry current = registry;
+    while (address(current) != address(0) && address(current) != address(root)) {
+        (IRegistry parent, string memory label) = current.getParent();
+        labels[count++] = label;
+        current = parent;
+    }
+    
+    // Reverse and trim array
+    return _reverseAndTrim(labels, count);
+}
+```
+
+### Walking Down the Tree
+
+```solidity
+function resolveToRegistry(IRegistry root, string[] memory labels) 
+    public view returns (IRegistry) 
+{
+    IRegistry current = root;
+    
+    for (uint256 i = labels.length; i > 0; i--) {
+        current = current.getSubregistry(labels[i - 1]);
+        if (address(current) == address(0)) {
+            return IRegistry(address(0));  // Path doesn't exist
+        }
+    }
+    
+    return current;
+}
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Always Set Parent Reference">
+    When creating a subregistry, immediately set its parent reference:
+    
+    ```solidity
+    IRegistry sub = new PermissionedRegistry(...);
+    sub.setParent(parentRegistry, "label");
+    ```
+    
+    This ensures canonical name resolution works correctly.
+  </Accordion>
+  
+  <Accordion title="Validate Registry Interfaces">
+    Before setting a subregistry, verify it implements IRegistry:
+    
+    ```solidity
+    require(
+        IERC165(address(subregistry)).supportsInterface(
+            type(IRegistry).interfaceId
+        ),
+        "Invalid registry"
+    );
+    ```
+  </Accordion>
+  
+  <Accordion title="Consider Expiry Propagation">
+    Child names should not outlive their parents:
+    
+    ```solidity
+    // When registering a subdomain, ensure:
+    require(
+        subdomainExpiry <= parentExpiry,
+        "Subdomain cannot outlive parent"
+    );
+    ```
+  </Accordion>
+  
+  <Accordion title="Plan for Registry Upgrades">
+    Design your system to handle registry changes:
+    
+    ```solidity
+    // Allow changing subregistry for upgrades
+    function upgradeSubregistry(uint256 tokenId, IRegistry newRegistry) external {
+        require(hasRoles(tokenId, ROLE_SET_SUBREGISTRY, msg.sender));
+        setSubregistry(tokenId, newRegistry);
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Canonical ID System" icon="fingerprint" href="/concepts/canonical-id-system">
+    Learn how token IDs work in the registry system
+  </Card>
+  
+  <Card title="Resolution Process" icon="route" href="/concepts/resolution-process">
+    Understand how the resolver traverses registries
+  </Card>
+  
+  <Card title="PermissionedRegistry" icon="shield" href="/registry/permissioned-registry">
+    Explore the full-featured registry implementation
+  </Card>
+  
+  <Card title="Access Control" icon="user-lock" href="/access-control/overview">
+    Deep dive into role-based permissions
+  </Card>
+</CardGroup>

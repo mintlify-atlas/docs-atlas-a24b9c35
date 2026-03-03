@@ -1,0 +1,585 @@
+---
+title: "Canonical ID System"
+description: "Understanding mutable token IDs, canonical IDs, and token regeneration in ENS v2"
+---
+
+## The Problem: Mutable Token IDs
+
+ENS v2 introduces a unique challenge: token IDs need to change in certain scenarios to maintain security and data integrity. This creates a system where:
+
+- **Token IDs are mutable** - They can change over time for the same name
+- **Canonical IDs are stable** - Internal representation remains constant
+- **Data persistence** - Registry data survives token regeneration
+
+<Warning>
+  **Critical Security Feature**: Token ID regeneration prevents marketplace griefing and ensures clean ownership after expiry.
+</Warning>
+
+## Core Concepts
+
+### Token ID vs Canonical ID
+
+<CodeGroup>
+
+```solidity Token ID
+// External-facing ID (ERC1155 token ID)
+// Changes when the token is regenerated
+uint256 tokenId = 0x1234567890abcdef1234567890abcdef1234567890abcdef12345678AABBCCDD;
+//                                                                  ^^^^^^^^
+//                                                                  Lower 32 bits = version
+```
+
+```solidity Canonical ID
+// Internal-facing ID (storage key)
+// Remains stable across token regenerations
+uint256 canonicalId = tokenId ^ uint32(tokenId);
+//                    0x1234567890abcdef1234567890abcdef1234567890abcdef1234567800000000
+//                                                                       ^^^^^^^^
+//                                                                       Lower 32 bits = 0
+```
+
+</CodeGroup>
+
+### The Versioning Mechanism
+
+Token IDs encode version information in their lower 32 bits:
+
+```solidity
+library LibLabel {
+    /// @notice Replace the lower 32-bits of `anyId` with `versionId`.
+    function withVersion(uint256 anyId, uint32 versionId) 
+        internal pure returns (uint256) 
+    {
+        return anyId ^ uint32(anyId) ^ versionId;
+    }
+}
+```
+
+**Breaking it down**:
+1. `anyId ^ uint32(anyId)` - Clears the lower 32 bits (creates canonical ID)
+2. `... ^ versionId` - Sets the new version in lower 32 bits
+
+**Reference**: [`LibLabel.sol:10-16`](/home/daytona/workspace/source/contracts/src/utils/LibLabel.sol#L10-L16)
+
+## When Token IDs Regenerate
+
+Token IDs regenerate in two critical scenarios:
+
+### 1. Re-Registration After Expiry
+
+<Steps>
+  <Step title="Name Expires">
+    The name's expiry timestamp passes:
+    
+    ```solidity
+    Entry storage entry = _entry(labelId);
+    uint64 expiry = entry.expiry;
+    
+    if (block.timestamp >= expiry) {
+        // Name is expired and available for re-registration
+    }
+    ```
+  </Step>
+  
+  <Step title="New Owner Registers">
+    Someone re-registers the expired name:
+    
+    ```solidity
+    if (prevOwner != address(0)) {
+        // Burn old token
+        _burn(prevOwner, tokenId, 1);
+        
+        // Increment version counters
+        ++entry.eacVersionId;      // Access control version
+        ++entry.tokenVersionId;    // Token version
+        
+        // Generate new token ID
+        tokenId = _constructTokenId(tokenId, entry);
+    }
+    ```
+  </Step>
+  
+  <Step title="Why This Matters">
+    **Security**: The new owner gets a fresh token ID with no residual roles from the previous owner:
+    
+    ```solidity
+    // Old token ID: 0x...00000001 (version 1)
+    // All old roles were assigned to version 1
+    
+    // New token ID: 0x...00000002 (version 2)
+    // No roles assigned yet - clean slate!
+    ```
+  </Step>
+</Steps>
+
+**Reference**: [`PermissionedRegistry.sol:180-185`](/home/daytona/workspace/source/contracts/src/registry/PermissionedRegistry.sol#L180-L185)
+
+### 2. Role Changes (Marketplace Protection)
+
+<Steps>
+  <Step title="Roles Are Modified">
+    When roles are granted or revoked, the token regenerates:
+    
+    ```solidity
+    function _onRolesGranted(
+        uint256 resource,
+        address account,
+        uint256 oldRoles,
+        uint256 newRoles,
+        uint256 roleBitmap
+    ) internal virtual override {
+        _regenerateToken(resource);
+    }
+    ```
+  </Step>
+  
+  <Step title="Token ID Updates">
+    The token is burned and re-minted with a new ID:
+    
+    ```solidity
+    function _regenerateToken(uint256 anyId) internal {
+        Entry storage entry = _entry(anyId);
+        if (!_isExpired(entry.expiry)) {
+            uint256 tokenId = _constructTokenId(anyId, entry);
+            address owner = super.ownerOf(tokenId);
+            
+            if (owner != address(0)) {
+                _burn(owner, tokenId, 1);
+                ++entry.tokenVersionId;
+                uint256 newTokenId = _constructTokenId(tokenId, entry);
+                _mint(owner, newTokenId, 1, "");
+                
+                emit TokenRegenerated(tokenId, newTokenId);
+            }
+        }
+    }
+    ```
+  </Step>
+  
+  <Step title="Marketplace Protection">
+    **Scenario**: Alice lists her name on OpenSea, then grants roles to Bob
+    
+    - Original listing: Token ID `0x...00000005`
+    - After granting roles: Token ID `0x...00000006`
+    - The OpenSea listing becomes invalid (old token ID)
+    - Buyer cannot purchase a name with unexpected permissions
+  </Step>
+</Steps>
+
+<Info>
+  **Why This Protects Users**: Without regeneration, a malicious seller could:
+  1. List a name on a marketplace
+  2. Grant `ROLE_SET_RESOLVER` to themselves
+  3. Buyer purchases the name
+  4. Seller changes the resolver despite no longer owning the name
+</Info>
+
+**Reference**: [`PermissionedRegistry.sol:399-419`](/home/daytona/workspace/source/contracts/src/registry/PermissionedRegistry.sol#L399-L419)
+
+## The Entry Storage Structure
+
+Each name has an associated entry that tracks versioning:
+
+```solidity
+struct Entry {
+    uint32 eacVersionId;        // Access control version counter
+    uint32 tokenVersionId;      // Token version counter
+    IRegistry subregistry;      // Subregistry address
+    uint64 expiry;              // Expiration timestamp
+    address resolver;           // Resolver address
+}
+
+mapping(uint256 storageId => Entry entry) internal _entries;
+```
+
+**Two Version Counters**:
+
+1. **`tokenVersionId`**: Increments when token is burned/re-minted
+   - Used to construct the external token ID
+   - Visible in ERC1155 events and marketplaces
+
+2. **`eacVersionId`**: Increments when roles change
+   - Used to construct the resource ID for access control
+   - Ensures expired names have a new permission space
+
+**Reference**: [`PermissionedRegistry.sol:56-62`](/home/daytona/workspace/source/contracts/src/registry/PermissionedRegistry.sol#L56-L62)
+
+## ID Construction Functions
+
+### Building Token IDs
+
+```solidity
+function _constructTokenId(uint256 anyId, Entry storage entry) 
+    internal view returns (uint256) 
+{
+    return LibLabel.withVersion(anyId, entry.tokenVersionId);
+}
+```
+
+**Result**: `canonicalId | tokenVersionId`
+
+Used for:
+- ERC1155 token operations
+- Ownership queries
+- Transfer events
+
+### Building Resource IDs
+
+```solidity
+function _constructResource(uint256 anyId, Entry storage entry) 
+    internal view returns (uint256) 
+{
+    return LibLabel.withVersion(
+        anyId,
+        _isExpired(entry.expiry) 
+            ? entry.eacVersionId + 1   // Next version for expired names
+            : entry.eacVersionId       // Current version for active names
+    );
+}
+```
+
+**Special Behavior**: Expired names use `eacVersionId + 1` so they have a clean permission space when re-registered.
+
+**Reference**: [`PermissionedRegistry.sol:481-495`](/home/daytona/workspace/source/contracts/src/registry/PermissionedRegistry.sol#L481-L495)
+
+## Working with IDs
+
+### Accepting Any ID Format
+
+Most registry functions accept `anyId` which can be:
+- A canonical ID (label hash)
+- A token ID (with version bits)
+- A resource ID (with EAC version bits)
+
+```solidity
+// All of these work:
+registry.setResolver(labelHash, resolver);           // Canonical ID
+registry.setResolver(currentTokenId, resolver);      // Current token ID  
+registry.setResolver(oldTokenId, resolver);          // Old token ID (if not expired)
+
+// The function internally derives the current token ID
+function setResolver(uint256 anyId, address resolver) public virtual {
+    (uint256 tokenId, Entry storage entry) = _checkExpiryAndTokenRoles(
+        anyId,
+        RegistryRolesLib.ROLE_SET_RESOLVER
+    );
+    // tokenId is now the CURRENT token ID regardless of input
+}
+```
+
+### Getting Current IDs
+
+The registry provides functions to retrieve current IDs:
+
+<CodeGroup>
+
+```solidity Get Token ID
+// Get the current token ID for any ID
+uint256 currentTokenId = registry.getTokenId(anyId);
+
+// Returns the token ID with current tokenVersionId
+```
+
+```solidity Get Resource ID
+// Get the current resource ID for any ID
+uint256 resourceId = registry.getResource(anyId);
+
+// Returns the resource ID with current eacVersionId
+```
+
+```solidity Get Full State
+// Get all current IDs and state at once
+IPermissionedRegistry.State memory state = registry.getState(anyId);
+
+// struct State {
+//     uint256 tokenId;        // Current token ID
+//     uint256 resource;       // Current resource ID
+//     uint64 expiry;          // Expiration timestamp
+//     address latestOwner;    // Current owner
+//     Status status;          // AVAILABLE, RESERVED, or REGISTERED
+// }
+```
+
+</CodeGroup>
+
+**Reference**: [`IPermissionedRegistry.sol`](/home/daytona/workspace/source/contracts/src/registry/interfaces/IPermissionedRegistry.sol)
+
+## Owner Queries
+
+### Two Types of Ownership Queries
+
+```solidity
+// 1. Current owner (respects version and expiry)
+address owner = registry.ownerOf(anyId);
+// Returns address(0) if:
+// - Token ID is not current
+// - Name is expired
+
+// 2. Latest owner (ignores version and expiry)
+address latestOwner = registry.latestOwnerOf(tokenId);
+// Returns the owner of this specific token ID
+// Even if it's an old version or expired
+```
+
+**Use Cases**:
+
+- **`ownerOf()`**: Standard ownership checks, marketplace integration
+- **`latestOwnerOf()`**: Historical queries, tracking token regeneration
+
+**Reference**: [`PermissionedRegistry.sol:313-326`](/home/daytona/workspace/source/contracts/src/registry/PermissionedRegistry.sol#L313-L326)
+
+## Events and Token Regeneration
+
+### Token Regeneration Event
+
+```solidity
+event TokenRegenerated(uint256 indexed oldTokenId, uint256 indexed newTokenId);
+```
+
+Emitted when a token ID changes:
+
+```solidity
+// Monitoring for regeneration
+registry.on("TokenRegenerated", (oldTokenId, newTokenId) => {
+    console.log(`Token regenerated: ${oldTokenId} → ${newTokenId}`);
+    
+    // Update your database/cache
+    updateTokenMapping(oldTokenId, newTokenId);
+    
+    // Cancel marketplace listings for old token
+    cancelListings(oldTokenId);
+});
+```
+
+### Token Resource Event
+
+```solidity
+event TokenResource(uint256 indexed tokenId, uint256 resource);
+```
+
+Emitted when a new token is created, linking it to its resource ID:
+
+```solidity
+// This tells indexers the permission space for a token
+emit TokenResource(tokenId, resource);
+```
+
+**Reference**: [`IRegistry.sol:48-49`](/home/daytona/workspace/source/contracts/src/registry/interfaces/IRegistry.sol#L48-L49)
+
+## Integration Patterns
+
+### Pattern 1: Store Canonical IDs
+
+```solidity
+// ✅ GOOD: Store canonical ID
+struct MyAppData {
+    uint256 nameId;  // Store: labelHash or canonical ID
+    // ...
+}
+
+// Always derive current token ID when needed
+function getCurrentToken(uint256 nameId) public view returns (uint256) {
+    return registry.getTokenId(nameId);
+}
+```
+
+```solidity
+// ❌ BAD: Store token ID
+struct MyAppData {
+    uint256 tokenId;  // This can become stale!
+    // ...
+}
+
+// Token ID might be outdated
+```
+
+### Pattern 2: Track Regenerations
+
+```solidity
+contract NameTracker {
+    mapping(uint256 canonicalId => uint256 currentTokenId) public tokenIds;
+    
+    // Update when token regenerates
+    function onTokenRegenerated(uint256 oldTokenId, uint256 newTokenId) external {
+        require(msg.sender == address(registry));
+        
+        uint256 canonicalId = oldTokenId ^ uint32(oldTokenId);
+        tokenIds[canonicalId] = newTokenId;
+    }
+}
+```
+
+### Pattern 3: Version-Aware Permissions
+
+```solidity
+function checkPermission(uint256 anyId, address user) public view returns (bool) {
+    // Get current resource ID (handles version automatically)
+    uint256 resource = registry.getResource(anyId);
+    
+    // Check permissions against current version
+    return registry.hasRoles(resource, REQUIRED_ROLE, user);
+}
+```
+
+## Edge Cases and Gotchas
+
+<AccordionGroup>
+  <Accordion title="Expired Names Have New Resource Space">
+    When a name expires, its resource ID advances:
+    
+    ```solidity
+    // Before expiry:
+    uint256 resource = registry.getResource(tokenId);
+    // resource = canonicalId | eacVersionId (e.g., version 5)
+    
+    // After expiry:
+    uint256 resource = registry.getResource(tokenId);
+    // resource = canonicalId | (eacVersionId + 1) (e.g., version 6)
+    ```
+    
+    This means permissions assigned during the last registration don't affect the next registration.
+  </Accordion>
+  
+  <Accordion title="Old Token IDs Return address(0)">
+    After regeneration, old token IDs appear to have no owner:
+    
+    ```solidity
+    uint256 oldTokenId = 0x...00000005;
+    uint256 newTokenId = 0x...00000006;
+    
+    registry.ownerOf(oldTokenId);  // Returns: address(0)
+    registry.ownerOf(newTokenId);  // Returns: actual owner
+    ```
+    
+    Use `latestOwnerOf()` if you need the owner of a specific version.
+  </Accordion>
+  
+  <Accordion title="Token Regeneration During Transfers">
+    Token IDs don't regenerate during transfers:
+    
+    ```solidity
+    function _update(address from, address to, uint256[] memory tokenIds, ...) {
+        // Transfers DO NOT regenerate tokens
+        // Only role changes regenerate
+    }
+    ```
+    
+    However, roles ARE transferred to the new owner, which DOES regenerate:
+    
+    ```solidity
+    if (externalTransfer) {
+        for (uint256 i; i < tokenIds.length; ++i) {
+            _transferRoles(getResource(tokenIds[i]), from, to, false);
+            // This triggers _onRolesGranted → _regenerateToken
+        }
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="Canonical ID Collisions Are Impossible">
+    Since canonical IDs are derived from label hashes:
+    
+    ```solidity
+    uint256 canonicalId = uint256(keccak256(bytes(label)));
+    ```
+    
+    Two labels cannot have the same canonical ID (keccak256 collision resistance).
+  </Accordion>
+</AccordionGroup>
+
+## Implementation Example
+
+Here's how to safely work with the ID system:
+
+```solidity
+contract NameManager {
+    IPermissionedRegistry public registry;
+    
+    // Store canonical IDs
+    mapping(address user => uint256[] nameIds) public userNames;
+    
+    function registerName(string memory label) external {
+        // Register and get canonical ID
+        uint256 labelId = LibLabel.id(label);
+        
+        registry.register(
+            label,
+            msg.sender,
+            IRegistry(address(0)),
+            address(0),
+            0,
+            type(uint64).max
+        );
+        
+        // Store canonical ID, not token ID
+        userNames[msg.sender].push(labelId);
+    }
+    
+    function getNameInfo(address user, uint256 index) 
+        external view 
+        returns (
+            uint256 canonicalId,
+            uint256 currentTokenId,
+            uint256 currentResource,
+            address owner
+        ) 
+    {
+        canonicalId = userNames[user][index];
+        
+        // Get current state
+        IPermissionedRegistry.State memory state = registry.getState(canonicalId);
+        
+        return (
+            canonicalId,
+            state.tokenId,
+            state.resource,
+            state.latestOwner
+        );
+    }
+    
+    function updateResolver(uint256 nameId, address newResolver) external {
+        // Can pass canonical ID, automatically uses current token ID
+        registry.setResolver(nameId, newResolver);
+    }
+}
+```
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Store Canonical IDs" icon="database">
+    Always store canonical IDs (label hashes) in your contracts, never token IDs which can change.
+  </Card>
+  
+  <Card title="Use getState()" icon="info-circle">
+    Use `getState()` to fetch all current IDs at once instead of multiple calls.
+  </Card>
+  
+  <Card title="Listen to Events" icon="bell">
+    Monitor `TokenRegenerated` events to track when token IDs change.
+  </Card>
+  
+  <Card title="Accept anyId" icon="hand-point-right">
+    Design your functions to accept any ID format - the registry handles conversion.
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Resolution Process" icon="route" href="/concepts/resolution-process">
+    See how canonical IDs are used in name resolution
+  </Card>
+  
+  <Card title="Registry Roles" icon="user-lock" href="/access-control/registry-roles">
+    Learn about resource-based permissions
+  </Card>
+  
+  <Card title="PermissionedRegistry" icon="file-contract" href="/registry/permissioned-registry">
+    Explore the full registry implementation
+  </Card>
+  
+  <Card title="ERC1155Singleton" icon="coins" href="/api/erc1155/erc1155-singleton">
+    Understand the token standard
+  </Card>
+</CardGroup>

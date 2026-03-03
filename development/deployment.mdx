@@ -1,0 +1,645 @@
+---
+title: Deployment
+description: Deploy ENS v2 contracts to testnets and mainnet
+---
+
+## Overview
+
+ENS v2 uses [Rocketh](https://rocketh.rocks/) (built on Hardhat Deploy) for managing deployments. The deployment system:
+
+- Executes scripts in dependency order
+- Saves deployment artifacts for reproducibility
+- Supports network-specific configurations
+- Enables deployment verification and upgrades
+
+## Deployment Architecture
+
+Deployments are organized in the `deploy/` directory with numbered prefixes indicating execution order:
+
+```
+deploy/
+├── 00_*.ts          # Core infrastructure (factories, root)
+├── 01_*.ts          # Registry implementations and metadata
+├── 02_*.ts          # Registrars and price oracles
+├── 03_*.ts          # Advanced registries (wrapper, user)
+└── universalResolver/
+    ├── 00_*.ts      # Resolver implementation
+    └── 01_*.ts      # Upgradeable proxy
+```
+
+### Deployment Order
+
+<Steps>
+  <Step title="Phase 0: Core Infrastructure">
+    - `HCAFactory`: Hierarchical Contract Access factory
+    - `VerifiableFactory`: UUPS proxy factory
+    - `RootRegistry`: ENS v2 root registry
+    - Resolver implementations (ENSV1, ENSV2, DNS resolvers)
+    - `DNSSECGatewayProvider`: DNSSEC verification
+    - `ETHReverseRegistrar`: Reverse name registration
+  </Step>
+
+  <Step title="Phase 1: Registry Layer">
+    - `SimpleRegistryMetadata`: Metadata provider
+    - `PermissionedResolverImpl`: Resolver implementation
+    - `UserRegistryImpl`: User registry implementation  
+    - `ETHRegistry`: `.eth` TLD registry
+    - `ReverseRegistry`: Reverse resolution registry
+    - `DNSTLDResolver`, `DNSAliasResolver`: DNS resolvers
+  </Step>
+
+  <Step title="Phase 2: Registrars and Oracles">
+    - `StandardRentPriceOracle`: Dynamic pricing
+    - `MockTokens`: Test ERC20 tokens (USDC, DAI)
+    - `ETHReverseResolver`: Reverse resolver for ETH addresses
+  </Step>
+
+  <Step title="Phase 3: Advanced Features">
+    - `ETHRegistrar`: `.eth` name registrar with commit-reveal
+    - `WrapperRegistryImpl`: Wrapper registry for v1 compatibility
+  </Step>
+
+  <Step title="Phase 4: Universal Resolver">
+    - `UniversalResolverV2`: Universal resolution implementation
+    - Upgradeable proxy for UniversalResolver
+  </Step>
+</Steps>
+
+## Deployment Scripts
+
+### Script Structure
+
+All deployment scripts follow this pattern:
+
+```typescript
+import { artifacts, execute } from "@rocketh";
+import { ROLES } from "../script/deploy-constants.js";
+
+export default execute(
+  async ({ deploy, execute: write, get, namedAccounts: { deployer, owner } }) => {
+    // Get dependencies
+    const dependency = get<ArtifactABI>("DependencyName");
+
+    // Deploy contract
+    const contract = await deploy("ContractName", {
+      account: deployer,
+      artifact: artifacts.ContractArtifact,
+      args: [
+        // Constructor arguments
+      ],
+    });
+
+    // Post-deployment setup
+    await write(contract, {
+      account: deployer,
+      functionName: "initialize",
+      args: [/* initialization args */],
+    });
+  },
+  {
+    tags: ["ContractName", "l1"],
+    dependencies: ["DependencyName"],
+  }
+);
+```
+
+### Example: RootRegistry Deployment
+
+From `deploy/00_RootRegistry.ts`:
+
+```typescript
+import { artifacts, execute } from "@rocketh";
+import { ROLES } from "../script/deploy-constants.js";
+
+export default execute(
+  async ({ deploy, get, namedAccounts: { deployer } }) => {
+    const hcaFactory = get<typeof artifacts.MockHCAFactoryBasic.abi>("HCAFactory");
+    const registryMetadata = get<typeof artifacts.SimpleRegistryMetadata.abi>(
+      "SimpleRegistryMetadata"
+    );
+
+    await deploy("RootRegistry", {
+      account: deployer,
+      artifact: artifacts.PermissionedRegistry,
+      args: [
+        hcaFactory.address,
+        registryMetadata.address,
+        deployer,
+        ROLES.ALL  // Grant all roles to deployer initially
+      ],
+    });
+  },
+  {
+    tags: ["RootRegistry", "l1"],
+    dependencies: ["HCAFactory", "RegistryMetadata"],
+  }
+);
+```
+
+### Example: ETHRegistry with Setup
+
+From `deploy/01_ETHRegistry.ts`:
+
+```typescript
+import { artifacts, execute } from "@rocketh";
+import { zeroAddress } from "viem";
+import { MAX_EXPIRY, ROLES } from "../script/deploy-constants.js";
+
+export default execute(
+  async ({ deploy, execute: write, get, namedAccounts: { deployer } }) => {
+    const rootRegistry = get<typeof artifacts.PermissionedRegistry.abi>("RootRegistry");
+    const hcaFactory = get<typeof artifacts.MockHCAFactoryBasic.abi>("HCAFactory");
+    const registryMetadata = get<typeof artifacts.SimpleRegistryMetadata.abi>(
+      "SimpleRegistryMetadata"
+    );
+
+    // Deploy ETH registry
+    const ethRegistry = await deploy("ETHRegistry", {
+      account: deployer,
+      artifact: artifacts.PermissionedRegistry,
+      args: [hcaFactory.address, registryMetadata.address, deployer, ROLES.ALL],
+    });
+
+    // Register .eth in root registry
+    await write(rootRegistry, {
+      account: deployer,
+      functionName: "register",
+      args: [
+        "eth",                    // label
+        deployer,                 // owner
+        ethRegistry.address,      // subregistry
+        zeroAddress,              // resolver (none yet)
+        0n,                       // tokenVersionId
+        MAX_EXPIRY               // never expires
+      ],
+    });
+  },
+  {
+    tags: ["ETHRegistry", "l1"],
+    dependencies: ["RootRegistry", "HCAFactory", "RegistryMetadata"],
+  }
+);
+```
+
+### Example: ETHRegistrar with Permissions
+
+From `deploy/03_ETHRegistrar.ts`:
+
+```typescript
+import { artifacts, execute } from "@rocketh";
+import { ROLES } from "../script/deploy-constants.js";
+
+export default execute(
+  async ({ deploy, execute: write, get, namedAccounts: { deployer, owner } }) => {
+    const hcaFactory = get<typeof artifacts.MockHCAFactoryBasic.abi>("HCAFactory");
+    const ethRegistry = get<typeof artifacts.PermissionedRegistry.abi>("ETHRegistry");
+    const rentPriceOracle = get<typeof artifacts.IRentPriceOracle.abi>(
+      "StandardRentPriceOracle"
+    );
+
+    const beneficiary = owner || deployer;
+    const SEC_PER_DAY = 86400n;
+
+    // Deploy ETH registrar
+    const ethRegistrar = await deploy("ETHRegistrar", {
+      account: deployer,
+      artifact: artifacts.ETHRegistrar,
+      args: [
+        ethRegistry.address,
+        hcaFactory.address,
+        beneficiary,              // funds recipient
+        60n,                      // minCommitmentAge (60 seconds)
+        SEC_PER_DAY,              // maxCommitmentAge (1 day)
+        28n * SEC_PER_DAY,        // minRegistrationDuration (28 days)
+        rentPriceOracle.address,
+      ],
+    });
+
+    // Grant registrar permissions on ETH registry
+    await write(ethRegistry, {
+      functionName: "grantRootRoles",
+      args: [
+        ROLES.REGISTRY.REGISTRAR | ROLES.REGISTRY.RENEW,
+        ethRegistrar.address,
+      ],
+      account: deployer,
+    });
+  },
+  {
+    tags: ["ETHRegistrar", "l1"],
+    dependencies: ["HCAFactory", "ETHRegistry", "StandardRentPriceOracle"],
+  }
+);
+```
+
+## Deployment Constants
+
+Constants are defined in `script/deploy-constants.ts`:
+
+```typescript
+// Maximum expiry timestamp (uint64 max)
+export const MAX_EXPIRY = (1n << 64n) - 1n;
+
+// Batch gateway configuration
+export const LOCAL_BATCH_GATEWAY_URL = "x-batch-gateway:true";
+
+// Role definitions (from EnhancedAccessControl)
+export const ROLES = {
+  ALL: 0x1111111111111111111111111111111111111111111111111111111111111111n,
+  
+  REGISTRY: {
+    REGISTRAR: 1n << 0n,
+    REGISTER_RESERVED: 1n << 4n,
+    SET_PARENT: 1n << 8n,
+    UNREGISTER: 1n << 12n,
+    RENEW: 1n << 16n,
+    SET_SUBREGISTRY: 1n << 20n,
+    SET_RESOLVER: 1n << 24n,
+    CAN_TRANSFER: 1n << 28n,
+    UPGRADE: 1n << 124n,
+  },
+  
+  REGISTRAR: {
+    SET_ORACLE: 1n << 0n,
+  },
+  
+  RESOLVER: {
+    SET_ADDR: 1n << 0n,
+    SET_TEXT: 1n << 4n,
+    SET_CONTENTHASH: 1n << 8n,
+    SET_PUBKEY: 1n << 12n,
+    SET_ABI: 1n << 16n,
+    SET_INTERFACE: 1n << 20n,
+    SET_NAME: 1n << 24n,
+    SET_ALIAS: 1n << 28n,
+    CLEAR: 1n << 32n,
+    UPGRADE: 1n << 124n,
+  },
+  
+  // Admin roles (shifted by 128 bits)
+  ADMIN: {
+    // ... (generated by adminify() function)
+  },
+};
+
+// Name status constants
+export const STATUS = {
+  AVAILABLE: 0,
+  RESERVED: 1,
+  REGISTERED: 2,
+};
+```
+
+## Network Configuration
+
+Rocketh uses network tags to control which scripts run:
+
+### Network Tags
+
+- **`l1`**: Layer 1 (Ethereum mainnet/testnets)
+- **`l2`**: Layer 2 networks
+- **`local`**: Local development networks
+- **`use_root`**: Deploy root contracts (not for mainnet)
+- **`allow_unsafe`**: Allow state manipulation (testing only)
+- **`legacy`**: Deploy ENS v1 contracts
+
+### Named Accounts
+
+Accounts are defined per network in the Rocketh config:
+
+```typescript
+accounts: {
+  deployer: "0x...",  // Deploys all contracts
+  owner: "0x...",     // Receives ownership after deployment
+  bridger: "0x...",   // Cross-chain bridge operator
+}
+```
+
+For the devnet (from `script/setup.ts`):
+
+```typescript
+const names = ["deployer", "owner", "bridger", "user", "user2"];
+const accounts = Array.from({ length: extraAccounts }, (_, i) =>
+  Object.assign(mnemonicToAccount(mnemonic, { addressIndex: i }), {
+    name: names[i] ?? `unnamed${i}`,
+  })
+);
+```
+
+## Running Deployments
+
+### Local Deployment (Devnet)
+
+The devnet automatically runs all deployments:
+
+```bash
+cd contracts
+bun run devnet
+```
+
+Deployments are saved to `deployments/devnet-local/`.
+
+### Custom Network Deployment
+
+To deploy to a custom network, use Rocketh directly:
+
+```bash
+# Set environment variables
+export DEPLOYER_PRIVATE_KEY="0x..."
+export RPC_URL="https://..."
+
+# Run deployment
+npx rocketh deploy --network <network-name>
+```
+
+### Network-Specific Deployment
+
+Create a network configuration:
+
+```typescript
+// rocketh.config.ts
+import { defineConfig } from "rocketh";
+
+export default defineConfig({
+  networks: {
+    sepolia: {
+      nodeUrl: process.env.SEPOLIA_RPC_URL,
+      tags: ["l1"],
+      accounts: {
+        deployer: process.env.DEPLOYER_ADDRESS,
+        owner: process.env.OWNER_ADDRESS,
+      },
+    },
+    mainnet: {
+      nodeUrl: process.env.MAINNET_RPC_URL,
+      tags: ["l1"],
+      accounts: {
+        deployer: process.env.DEPLOYER_ADDRESS,
+        owner: process.env.OWNER_ADDRESS,
+      },
+    },
+  },
+});
+```
+
+## Deployment Artifacts
+
+Deployment data is saved in `deployments/<network-name>/`:
+
+```
+deployments/devnet-local/
+├── RootRegistry.json
+├── ETHRegistry.json
+├── ETHRegistrar.json
+├── UniversalResolverV2.json
+└── ...
+```
+
+Each artifact contains:
+
+```json
+{
+  "address": "0x...",
+  "abi": [...],
+  "transactionHash": "0x...",
+  "receipt": {...},
+  "args": [...],
+  "bytecode": "0x...",
+  "deployedBytecode": "0x...",
+  "metadata": {...}
+}
+```
+
+## Post-Deployment Setup
+
+### Verify Contracts
+
+Use the Rocketh verifier plugin:
+
+```bash
+npx rocketh verify --network <network-name>
+```
+
+This submits source code to Etherscan-compatible explorers.
+
+### Transfer Ownership
+
+After deployment, transfer ownership from deployer to owner:
+
+```solidity
+// Example: Transfer root registry ownership
+rootRegistry.transferOwnership(owner);
+
+// Or revoke deployer roles and grant to owner
+rootRegistry.revokeRootRoles(ROLES.ALL, deployer);
+rootRegistry.grantRootRoles(ROLES.ALL, owner);
+```
+
+### Configure Subregistries
+
+Register TLDs in the root registry:
+
+```typescript
+await rootRegistry.write.register([
+  "box",              // TLD label
+  owner,              // owner
+  boxRegistry,        // subregistry address
+  zeroAddress,        // resolver
+  0n,                 // tokenVersionId
+  MAX_EXPIRY          // expiry
+]);
+```
+
+### Set Up Resolvers
+
+Deploy and configure resolvers:
+
+```typescript
+// Deploy resolver
+const resolver = await deployment.deployPermissionedResolver({
+  account: deployer,
+  admin: owner,
+  roles: ROLES.ALL,
+});
+
+// Set resolver for a name
+await ethRegistry.write.setResolver([
+  tokenId,
+  resolver.address
+]);
+```
+
+## Security Considerations
+
+<Warning>
+  **Critical**: Follow these security practices for production deployments.
+</Warning>
+
+### Private Key Management
+
+- **Never commit private keys** to version control
+- Use hardware wallets for mainnet deployments
+- Store keys in environment variables or secure vaults
+- Use different keys for deployer and owner roles
+
+### Role Assignment
+
+- Grant minimal roles required for operation
+- Use the `ADMIN` role hierarchy for delegation
+- Transfer root roles from deployer to owner after deployment
+- Audit all role grants before deployment
+
+### Contract Verification
+
+- Verify all contracts on Etherscan
+- Match deployment bytecode with source code
+- Document constructor arguments
+- Enable source code viewing
+
+### Deployment Checklist
+
+<Steps>
+  <Step title="Pre-deployment">
+    - [ ] Audit all contracts
+    - [ ] Test on testnet
+    - [ ] Verify constructor arguments
+    - [ ] Review role assignments
+    - [ ] Prepare deployment scripts
+  </Step>
+
+  <Step title="Deployment">
+    - [ ] Deploy in correct order (respect dependencies)
+    - [ ] Save deployment artifacts
+    - [ ] Record transaction hashes
+    - [ ] Monitor deployment success
+  </Step>
+
+  <Step title="Post-deployment">
+    - [ ] Verify contracts on explorer
+    - [ ] Transfer ownership
+    - [ ] Revoke deployer privileges
+    - [ ] Test critical functions
+    - [ ] Document deployed addresses
+    - [ ] Update frontend configurations
+  </Step>
+</Steps>
+
+## Upgradeable Contracts
+
+Some contracts use UUPS proxies via `VerifiableFactory`:
+
+### Deploying Upgradeable Contracts
+
+```typescript
+import { deployVerifiableProxy } from "./test/integration/fixtures/deployVerifiableProxy.js";
+
+const proxy = await deployVerifiableProxy({
+  walletClient,
+  factoryAddress: verifiableFactory.address,
+  implAddress: permissionedResolverImpl.address,
+  abi: artifacts.PermissionedResolver.abi,
+  functionName: "initialize",
+  args: [admin, roles],
+  salt: 12345n,  // Deterministic deployment
+});
+```
+
+### Upgrading Contracts
+
+```typescript
+// Deploy new implementation
+const newImpl = await deploy("PermissionedResolverImplV2", {
+  artifact: artifacts.PermissionedResolverV2,
+});
+
+// Upgrade via UUPS
+await proxy.write.upgradeToAndCall([
+  newImpl.address,
+  "0x"  // No initialization data
+]);
+```
+
+<Warning>
+  Only accounts with `ROLE_UPGRADE` can upgrade contracts. Ensure this role is properly managed.
+</Warning>
+
+## Environment Variables
+
+### Required Variables
+
+```bash
+# RPC endpoints
+MAINNET_RPC_URL=https://...
+SEPOLIA_RPC_URL=https://...
+
+# Accounts
+DEPLOYER_PRIVATE_KEY=0x...
+DEPLOYER_ADDRESS=0x...
+OWNER_ADDRESS=0x...
+
+# Optional
+ETHERSCAN_API_KEY=...
+BATCH_GATEWAY_URLS=["https://..."]
+```
+
+### Devnet Variables
+
+```bash
+# Devnet configuration
+ANVIL_IP_ADDR=0.0.0.0
+FOUNDRY_DISABLE_NIGHTLY_WARNING=true
+BATCH_GATEWAY_URLS=["x-batch-gateway:true"]
+```
+
+## Troubleshooting
+
+### Deployment Fails with "Nonce too low"
+
+Reset the deployer nonce or wait for pending transactions to confirm.
+
+### "Insufficient funds" Error
+
+Ensure the deployer account has enough ETH for:
+- Contract deployment gas costs
+- Post-deployment transactions (registration, setup)
+
+### Dependency Not Found
+
+Check that dependency tags are correct and that required contracts deployed first:
+
+```typescript
+{
+  tags: ["MyContract"],
+  dependencies: ["Dependency1", "Dependency2"],  // Must deploy first
+}
+```
+
+### Contract Address Mismatch
+
+Clear old deployments:
+
+```bash
+rm -rf deployments/<network-name>
+```
+
+Then re-deploy.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Development Setup" icon="wrench" href="/development/setup">
+    Configure your environment
+  </Card>
+  
+  <Card title="Testing" icon="flask" href="/development/testing">
+    Run tests on deployed contracts
+  </Card>
+  
+  <Card title="Local Devnet" icon="server" href="/development/devnet">
+    Test deployments locally
+  </Card>
+  
+  <Card title="Contract Reference" icon="book" href="/api/registry/permissioned-registry">
+    Learn about deployed contracts
+  </Card>
+</CardGroup>

@@ -1,0 +1,545 @@
+---
+title: EnhancedAccessControl System
+description: Technical deep dive into the EnhancedAccessControl implementation
+---
+
+The `EnhancedAccessControl` abstract contract is the foundation of ENS v2's permission system. It provides a gas-efficient, bitmap-based implementation of resource-scoped roles with admin role pairing.
+
+## Architecture
+
+### Storage Structure
+
+EAC uses two primary storage mappings:
+
+```solidity
+// User roles within a resource stored as a bitmap
+// Resource -> User -> RoleBitmap
+mapping(uint256 resource => mapping(address account => uint256 roleBitmap)) private _roles;
+
+// The number of assignees for a given role in a given resource
+// Each role's count is represented by 4 bits, in little-endian order
+mapping(uint256 resource => uint256 roleCount) private _roleCount;
+```
+
+### Role Bitmap Layout
+
+Roles are stored in a `uint256` bitmap with a specific structure:
+
+<CodeGroup>
+```solidity Regular Roles (Lower 128 bits)
+// Bits 0-3:   Role 0
+// Bits 4-7:   Role 1
+// Bits 8-11:  Role 2
+// Bits 12-15: Role 3
+// ...
+// Bits 124-127: Role 31
+```
+
+```solidity Admin Roles (Upper 128 bits)
+// Bits 128-131: Admin for Role 0
+// Bits 132-135: Admin for Role 1
+// Bits 136-139: Admin for Role 2
+// Bits 140-143: Admin for Role 3
+// ...
+// Bits 252-255: Admin for Role 31
+```
+</CodeGroup>
+
+This layout enables efficient admin role lookup:
+
+```solidity
+uint256 adminRole = role << 128;
+```
+
+## Core Functions
+
+### Granting Roles
+
+#### For Specific Resources
+
+```solidity
+function grantRoles(
+    uint256 resource,
+    uint256 roleBitmap,
+    address account
+) public returns (bool);
+```
+
+<ParamField path="resource" type="uint256">
+  The resource ID to grant roles within (cannot be ROOT_RESOURCE)
+</ParamField>
+
+<ParamField path="roleBitmap" type="uint256">
+  Bitmap of roles to grant (can include multiple roles via bitwise OR)
+</ParamField>
+
+<ParamField path="account" type="address">
+  The address to grant roles to
+</ParamField>
+
+<ParamField path="returns" type="bool">
+  `true` if roles were granted, `false` if account already had all roles
+</ParamField>
+
+**Requirements:**
+- Caller must hold the admin roles for all roles in `roleBitmap`
+- `resource` cannot be `ROOT_RESOURCE` (use `grantRootRoles` instead)
+- Cannot exceed 15 assignees per role
+
+**Example:**
+
+```solidity
+// Grant multiple roles at once
+uint256 roles = ROLE_SET_RESOLVER | ROLE_SET_SUBREGISTRY;
+registry.grantRoles(tokenId, roles, operator);
+```
+
+#### For Root Resource
+
+```solidity
+function grantRootRoles(
+    uint256 roleBitmap,
+    address account
+) public returns (bool);
+```
+
+Grants roles at the ROOT_RESOURCE level, making them effective across all resources.
+
+```solidity
+// Grant contract-wide resolver permission
+registry.grantRootRoles(
+    RegistryRolesLib.ROLE_SET_RESOLVER,
+    admin
+);
+```
+
+### Revoking Roles
+
+#### For Specific Resources
+
+```solidity
+function revokeRoles(
+    uint256 resource,
+    uint256 roleBitmap,
+    address account
+) public returns (bool);
+```
+
+**Requirements:**
+- Caller must hold the admin roles for all roles in `roleBitmap`
+- `resource` cannot be `ROOT_RESOURCE` (use `revokeRootRoles` instead)
+
+**Example:**
+
+```solidity
+// Revoke resolver permission
+registry.revokeRoles(
+    tokenId,
+    RegistryRolesLib.ROLE_SET_RESOLVER,
+    operator
+);
+```
+
+#### For Root Resource
+
+```solidity
+function revokeRootRoles(
+    uint256 roleBitmap,
+    address account
+) public returns (bool);
+```
+
+<Note>
+Admin roles can be revoked from yourself, enabling patterns like soulbound tokens by revoking `ROLE_CAN_TRANSFER_ADMIN`.
+</Note>
+
+### Checking Roles
+
+#### Resource-Specific Check
+
+```solidity
+function hasRoles(
+    uint256 resource,
+    uint256 roleBitmap,
+    address account
+) public view returns (bool);
+```
+
+Returns `true` if `account` has **all** roles in `roleBitmap` for either the specific resource or the ROOT_RESOURCE.
+
+```solidity
+// Check if user can set resolver
+if (registry.hasRoles(tokenId, ROLE_SET_RESOLVER, user)) {
+    // User has permission
+}
+```
+
+#### Root-Only Check
+
+```solidity
+function hasRootRoles(
+    uint256 roleBitmap,
+    address account
+) public view returns (bool);
+```
+
+Returns `true` only if roles are granted at the ROOT_RESOURCE level (does not check resource-specific roles).
+
+### Role Information
+
+#### Get Role Bitmap
+
+```solidity
+function roles(
+    uint256 resource,
+    address account
+) public view returns (uint256);
+```
+
+Returns the complete role bitmap for an account in a specific resource.
+
+```solidity
+uint256 userRoles = registry.roles(tokenId, user);
+if (userRoles & ROLE_SET_RESOLVER != 0) {
+    // User has resolver role
+}
+```
+
+#### Get Assignee Count
+
+```solidity
+function getAssigneeCount(
+    uint256 resource,
+    uint256 roleBitmap
+) public view returns (uint256 counts, uint256 mask);
+```
+
+Returns the number of assignees for each role as a packed 4-bit array.
+
+```solidity
+(uint256 counts, uint256 mask) = registry.getAssigneeCount(
+    tokenId,
+    ROLE_SET_RESOLVER
+);
+```
+
+## Modifiers
+
+### onlyRoles
+
+Restricts function access to accounts with specific roles:
+
+```solidity
+function setResolver(uint256 tokenId, address resolver)
+    public
+    onlyRoles(tokenId, ROLE_SET_RESOLVER)
+{
+    // Implementation
+}
+```
+
+### onlyRootRoles
+
+Restricts access to accounts with root-level roles:
+
+```solidity
+function setParent(IRegistry parent, string memory label)
+    public
+    onlyRootRoles(ROLE_SET_PARENT)
+{
+    // Implementation
+}
+```
+
+### canGrantRoles
+
+Ensures caller can grant the specified roles:
+
+```solidity
+function customGrantRoles(uint256 resource, uint256 roleBitmap, address account)
+    public
+    canGrantRoles(resource, roleBitmap)
+{
+    // Custom grant logic
+}
+```
+
+### canRevokeRoles
+
+Ensures caller can revoke the specified roles:
+
+```solidity
+function customRevokeRoles(uint256 resource, uint256 roleBitmap, address account)
+    public
+    canRevokeRoles(resource, roleBitmap)
+{
+    // Custom revoke logic
+}
+```
+
+## Internal Functions
+
+Derived contracts have access to internal functions for custom logic:
+
+### _grantRoles
+
+```solidity
+function _grantRoles(
+    uint256 resource,
+    uint256 roleBitmap,
+    address account,
+    bool executeCallbacks
+) internal returns (bool);
+```
+
+Grants roles without permission checks. Set `executeCallbacks` to `false` to skip `_onRolesGranted` callback.
+
+### _revokeRoles
+
+```solidity
+function _revokeRoles(
+    uint256 resource,
+    uint256 roleBitmap,
+    address account,
+    bool executeCallbacks
+) internal returns (bool);
+```
+
+Revokes roles without permission checks.
+
+### _transferRoles
+
+```solidity
+function _transferRoles(
+    uint256 resource,
+    address srcAccount,
+    address dstAccount,
+    bool executeCallbacks
+) internal;
+```
+
+Transfers all roles from one account to another within a resource. Used during NFT transfers.
+
+### _revokeAllRoles
+
+```solidity
+function _revokeAllRoles(
+    uint256 resource,
+    address account,
+    bool executeCallbacks
+) internal returns (bool);
+```
+
+Revokes all roles (including admin roles) from an account.
+
+## Lifecycle Hooks
+
+Override these hooks to implement custom behavior:
+
+### _onRolesGranted
+
+```solidity
+function _onRolesGranted(
+    uint256 resource,
+    address account,
+    uint256 oldRoles,
+    uint256 newRoles,
+    uint256 roleBitmap
+) internal virtual;
+```
+
+Called after roles are granted. In `PermissionedRegistry`, this triggers token regeneration.
+
+### _onRolesRevoked
+
+```solidity
+function _onRolesRevoked(
+    uint256 resource,
+    address account,
+    uint256 oldRoles,
+    uint256 newRoles,
+    uint256 roleBitmap
+) internal virtual;
+```
+
+Called after roles are revoked. Also triggers token regeneration in registries.
+
+## Events
+
+### EACRolesChanged
+
+```solidity
+event EACRolesChanged(
+    uint256 indexed resource,
+    address indexed account,
+    uint256 oldRoleBitmap,
+    uint256 newRoleBitmap
+);
+```
+
+Emitted whenever roles are granted or revoked.
+
+**Parameters:**
+- `resource`: The resource where roles changed
+- `account`: The account whose roles changed
+- `oldRoleBitmap`: The previous role bitmap
+- `newRoleBitmap`: The new role bitmap
+
+## Error Reference
+
+### EACUnauthorizedAccountRoles
+
+```solidity
+error EACUnauthorizedAccountRoles(
+    uint256 resource,
+    uint256 roleBitmap,
+    address account
+);
+```
+
+Thrown when an account lacks required roles for an operation.
+
+**Example:** `/home/daytona/workspace/source/contracts/src/access-control/EnhancedAccessControl.sol:384`
+
+### EACCannotGrantRoles
+
+```solidity
+error EACCannotGrantRoles(
+    uint256 resource,
+    uint256 roleBitmap,
+    address account
+);
+```
+
+Thrown when attempting to grant roles without the necessary admin roles.
+
+### EACCannotRevokeRoles
+
+```solidity
+error EACCannotRevokeRoles(
+    uint256 resource,
+    uint256 roleBitmap,
+    address account
+);
+```
+
+Thrown when attempting to revoke roles without the necessary admin roles.
+
+### EACRootResourceNotAllowed
+
+```solidity
+error EACRootResourceNotAllowed();
+```
+
+Thrown when using `grantRoles` or `revokeRoles` with `ROOT_RESOURCE`. Use `grantRootRoles` or `revokeRootRoles` instead.
+
+### EACMaxAssignees
+
+```solidity
+error EACMaxAssignees(uint256 resource, uint256 role);
+```
+
+Thrown when trying to grant a role that already has 15 assignees.
+
+### EACMinAssignees
+
+```solidity
+error EACMinAssignees(uint256 resource, uint256 role);
+```
+
+Thrown when role count underflows (internal error).
+
+### EACInvalidRoleBitmap
+
+```solidity
+error EACInvalidRoleBitmap(uint256 roleBitmap);
+```
+
+Thrown when a role bitmap contains bits outside valid role positions.
+
+### EACInvalidAccount
+
+```solidity
+error EACInvalidAccount();
+```
+
+Thrown when attempting to grant roles to the zero address.
+
+## Implementation Details
+
+### Permission Calculation
+
+The `hasRoles` function implements inheritance:
+
+```solidity
+function hasRoles(
+    uint256 resource,
+    uint256 roleBitmap,
+    address account
+) public view virtual returns (bool) {
+    return (
+        (_roles[ROOT_RESOURCE][account] | _roles[resource][account]) & roleBitmap
+    ) == roleBitmap;
+}
+```
+
+This bitwise OR combines root and resource-specific roles, then checks if all required roles are present.
+
+### Admin Role Lookup
+
+Admin roles are stored 128 bits higher than their corresponding regular roles:
+
+```solidity
+uint256 adminRole = role << 128;
+```
+
+This enables O(1) admin role lookup and validation.
+
+### Assignee Counting
+
+Each role's assignee count occupies 4 bits in the `_roleCount` mapping, limiting each role to 15 assignees. This uses the role bitmap itself as the increment/decrement value:
+
+```solidity
+if (isGrant) {
+    _roleCount[resource] += roleBitmap;
+} else {
+    _roleCount[resource] -= roleBitmap;
+}
+```
+
+## Best Practices
+
+<Tip>
+**Combine Roles**: When granting multiple roles, combine them with bitwise OR in a single transaction to save gas:
+
+```solidity
+uint256 roles = ROLE_SET_RESOLVER | ROLE_SET_SUBREGISTRY | ROLE_RENEW;
+registry.grantRoles(tokenId, roles, operator);
+```
+</Tip>
+
+<Warning>
+**Root Roles Are Powerful**: Granting roles at the root level gives permissions across all resources. Use sparingly for trusted administrators only.
+</Warning>
+
+<Note>
+**Event-Based Indexing**: All role changes emit events. Build indexers that track these events to maintain an off-chain permission database.
+</Note>
+
+## Related Interfaces
+
+- **IEnhancedAccessControl**: Public interface for the access control system
+- **EACBaseRolesLib**: Library with role constants (`ALL_ROLES`, `ADMIN_ROLES`)
+- **RegistryRolesLib**: Registry-specific role definitions
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Registry Roles" href="/access-control/registry-roles" icon="list-check">
+    Learn about specific roles in registry contracts
+  </Card>
+  
+  <Card title="Permission Inheritance" href="/access-control/permission-inheritance" icon="diagram-project">
+    Understand how root permissions cascade to resources
+  </Card>
+</CardGroup>

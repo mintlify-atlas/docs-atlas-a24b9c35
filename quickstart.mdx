@@ -1,80 +1,412 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quickstart Guide
+description: Get started with ENS v2 Contracts in minutes
 ---
 
-## Get started in three steps
+# Quickstart
 
-Get your documentation site running locally and make your first customization.
+This guide will get you up and running with ENS v2 contracts in minutes. You'll learn how to deploy the contracts locally, register a name, and resolve it.
 
-### Step 1: Set up your local environment
+## Prerequisites
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+Before you begin, ensure you have:
 
-### Step 2: Deploy your changes
+- Node.js v24+
+- Foundry v1.3.2+
+- Bun v1.2+
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+<Info>
+See the [Installation](/installation) page for detailed setup instructions.
+</Info>
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+## Quick Setup
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+<Steps>
+  <Step title="Clone and Install">
+    Clone the repository and install dependencies:
 
-### Step 3: Go live
+    ```bash
+    git clone https://github.com/ensdomains/contracts-v2
+    cd contracts-v2/contracts
+    bun i
+    forge i
+    ```
+  </Step>
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+  <Step title="Build Contracts">
+    Compile both Foundry and Hardhat contracts:
 
-## Next steps
+    ```bash
+    forge build
+    bun run compile:hardhat
+    ```
+  </Step>
 
-Now that you have your docs running, explore these key features:
+  <Step title="Start the Devnet">
+    Launch a local development network with all contracts deployed:
 
-<CardGroup cols={2}>
+    ```bash
+    bun run devnet
+    ```
 
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
+    This starts a local chain at `http://localhost:8545` (Chain ID: 31337) with:
+    - Root Registry deployed
+    - ETH Registry (.eth TLD)
+    - Universal Resolver
+    - ETH Registrar with pricing oracle
+    - Pre-configured test accounts
+  </Step>
+</Steps>
 
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
+## Register Your First Name
 
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
+ENS v2 uses a commit-reveal scheme to prevent front-running. Here's how to register a name:
 
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
+<Steps>
+  <Step title="Create a Commitment">
+    First, create a commitment hash for your registration:
 
-</CardGroup>
+    ```solidity
+    // Calculate commitment
+    bytes32 commitment = ethRegistrar.makeCommitment(
+        "myname",           // label
+        owner,              // owner address
+        secret,             // random bytes32 secret
+        IRegistry(address(0)), // subregistry (optional)
+        resolver,           // resolver address
+        duration,           // registration duration in seconds
+        bytes32(0)          // referrer (optional)
+    );
+    ```
+  </Step>
+
+  <Step title="Submit the Commitment">
+    Submit the commitment and wait for the minimum commitment age:
+
+    ```solidity
+    // Submit commitment
+    ethRegistrar.commit(commitment);
+
+    // Wait for MIN_COMMITMENT_AGE (typically 60 seconds)
+    // This prevents front-running attacks
+    ```
+
+    <Warning>
+    The commitment must be consumed before `MAX_COMMITMENT_AGE` expires (typically 24 hours).
+    </Warning>
+  </Step>
+
+  <Step title="Register the Name">
+    After the waiting period, register the name:
+
+    ```solidity
+    // Approve payment token
+    paymentToken.approve(address(ethRegistrar), price);
+
+    // Register the name
+    uint256 tokenId = ethRegistrar.register(
+        "myname",           // label
+        owner,              // owner address
+        secret,             // same secret from commitment
+        IRegistry(address(0)), // subregistry
+        resolver,           // resolver address
+        duration,           // duration in seconds (e.g., 365 days)
+        paymentToken,       // payment ERC20 token
+        bytes32(0)          // referrer
+    );
+    ```
+
+    The registrar automatically grants these roles to the owner:
+    - `ROLE_SET_SUBREGISTRY` + admin
+    - `ROLE_SET_RESOLVER` + admin
+    - `ROLE_CAN_TRANSFER_ADMIN`
+  </Step>
+</Steps>
+
+## Set Resolver Records
+
+Once you own a name, set its resolver records:
+
+<CodeGroup>
+```solidity Set Address Record
+// Set Ethereum address
+resolver.setAddr(
+    namehash("myname.eth"),
+    0x1234567890123456789012345678901234567890
+);
+
+// Set address for another chain
+resolver.setAddr(
+    namehash("myname.eth"),
+    60,  // coinType for Ethereum
+    abi.encodePacked(address(0x1234567890123456789012345678901234567890))
+);
+```
+
+```solidity Set Text Records
+// Set avatar
+resolver.setText(
+    namehash("myname.eth"),
+    "avatar",
+    "https://example.com/avatar.png"
+);
+
+// Set description
+resolver.setText(
+    namehash("myname.eth"),
+    "description",
+    "My ENS profile"
+);
+
+// Set social handles
+resolver.setText(
+    namehash("myname.eth"),
+    "com.twitter",
+    "@myhandle"
+);
+```
+
+```solidity Set Contenthash
+// Set IPFS contenthash
+resolver.setContenthash(
+    namehash("myname.eth"),
+    ipfsContenthash  // encoded IPFS hash
+);
+```
+</CodeGroup>
+
+## Resolve Names
+
+Use the Universal Resolver to query any ENS name:
+
+<CodeGroup>
+```solidity Basic Resolution
+// Resolve an address
+(bytes memory result, address resolverAddress) = universalResolver.resolve(
+    dnsEncode("myname.eth"),
+    abi.encodeWithSelector(IAddrResolver.addr.selector, namehash("myname.eth"))
+);
+address owner = abi.decode(result, (address));
+```
+
+```solidity Resolve Text Records
+// Resolve a text record
+(bytes memory result, ) = universalResolver.resolve(
+    dnsEncode("myname.eth"),
+    abi.encodeWithSelector(
+        ITextResolver.text.selector,
+        namehash("myname.eth"),
+        "avatar"
+    )
+);
+string memory avatar = abi.decode(result, (string));
+```
+
+```solidity Wildcard Resolution
+// Resolve a subdomain (wildcard supported)
+// If sub.myname.eth has no resolver, falls back to myname.eth's resolver
+(bytes memory result, ) = universalResolver.resolve(
+    dnsEncode("sub.myname.eth"),
+    abi.encodeWithSelector(
+        IAddrResolver.addr.selector,
+        namehash("sub.myname.eth")
+    )
+);
+```
+</CodeGroup>
+
+## Manage Subdomains
+
+Create and manage subdomains under your name:
+
+```solidity
+// Register a subdomain
+uint256 subTokenId = registry.register(
+    "sub",              // subdomain label
+    subOwner,           // subdomain owner
+    IRegistry(address(0)), // no sub-registry
+    subResolver,        // resolver for subdomain
+    ROLE_SET_RESOLVER | ROLE_SET_RESOLVER_ADMIN, // roles granted to owner
+    expiryTimestamp     // expiry (must be <= parent expiry)
+);
+```
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+You need `ROLE_REGISTRAR` on the registry to create subdomains. This role is automatically granted at the root level when you own the parent name.
 </Note>
+
+## Grant Permissions
+
+Delegate specific permissions to other addresses:
+
+<CodeGroup>
+```solidity Grant Resolver Permission
+// Allow someone to manage resolver settings
+registry.grantRoles(
+    tokenId,
+    RegistryRolesLib.ROLE_SET_RESOLVER,
+    operatorAddress
+);
+```
+
+```solidity Grant Multiple Roles
+// Grant multiple roles at once
+uint256 roles = RegistryRolesLib.ROLE_SET_RESOLVER |
+                RegistryRolesLib.ROLE_SET_SUBREGISTRY;
+registry.grantRoles(tokenId, roles, operatorAddress);
+```
+
+```solidity Create Soulbound Name
+// Revoke transfer ability to make name soulbound
+registry.revokeRoles(
+    tokenId,
+    RegistryRolesLib.ROLE_CAN_TRANSFER_ADMIN,
+    ownerAddress  // revoke from yourself
+);
+// Name is now non-transferable
+```
+</CodeGroup>
+
+## Renew a Name
+
+Extend the registration period of a name:
+
+```solidity
+// Calculate renewal price
+(uint256 price, ) = ethRegistrar.rentPrice(
+    "myname",
+    currentOwner,
+    365 days,     // renewal duration
+    paymentToken
+);
+
+// Approve payment
+paymentToken.approve(address(ethRegistrar), price);
+
+// Renew the name
+ethRegistrar.renew(
+    "myname",
+    365 days,     // duration to add
+    paymentToken,
+    bytes32(0)    // referrer
+);
+```
+
+## Check Name Availability
+
+Before registering, check if a name is available:
+
+```solidity
+// Check if name is available
+bool available = ethRegistrar.isAvailable("myname");
+
+// Get detailed status
+IPermissionedRegistry.Status status = registry.getStatus(labelId);
+// Status can be: AVAILABLE, RESERVED, or REGISTERED
+
+// Get full state including expiry and token ID
+IPermissionedRegistry.State memory state = registry.getState(labelId);
+// state.status, state.expiry, state.tokenId, state.latestOwner
+```
+
+## Working with TypeScript
+
+Here's a complete TypeScript example using viem:
+
+```typescript
+import { createPublicClient, createWalletClient, http } from 'viem';
+import { privateKeyToAccount } from 'viem/accounts';
+import { localhost } from 'viem/chains';
+
+// Setup client
+const client = createWalletClient({
+  chain: localhost,
+  transport: http('http://localhost:8545'),
+});
+
+// Load contracts (from deployment)
+const ethRegistrar = {
+  address: '0x...', // deployed address
+  abi: [...], // ETHRegistrar ABI
+};
+
+// Generate secret
+const secret = '0x' + crypto.randomBytes(32).toString('hex');
+
+// Create commitment
+const commitment = await client.readContract({
+  ...ethRegistrar,
+  functionName: 'makeCommitment',
+  args: [
+    'myname',
+    account.address,
+    secret,
+    '0x0000000000000000000000000000000000000000',
+    resolverAddress,
+    BigInt(365 * 24 * 60 * 60),
+    '0x0000000000000000000000000000000000000000000000000000000000000000',
+  ],
+});
+
+// Submit commitment
+await client.writeContract({
+  ...ethRegistrar,
+  functionName: 'commit',
+  args: [commitment],
+});
+
+// Wait 60 seconds...
+
+// Register name
+await client.writeContract({
+  ...ethRegistrar,
+  functionName: 'register',
+  args: [
+    'myname',
+    account.address,
+    secret,
+    '0x0000000000000000000000000000000000000000',
+    resolverAddress,
+    BigInt(365 * 24 * 60 * 60),
+    paymentTokenAddress,
+    '0x0000000000000000000000000000000000000000000000000000000000000000',
+  ],
+});
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Core Concepts" icon="book" href="/concepts/architecture">
+    Deep dive into ENS v2 architecture
+  </Card>
+  <Card title="Access Control" icon="shield" href="/access-control/overview">
+    Learn about the role system
+  </Card>
+  <Card title="Universal Resolver" icon="magnifying-glass" href="/resolution/universal-resolver">
+    Advanced resolution patterns
+  </Card>
+  <Card title="Migration Guide" icon="arrows-turn-right" href="/migration/overview">
+    Migrate from ENS v1 to v2
+  </Card>
+</CardGroup>
+
+## Common Issues
+
+<AccordionGroup>
+  <Accordion title="CommitmentTooNew error">
+    You need to wait for `MIN_COMMITMENT_AGE` (typically 60 seconds) after submitting a commitment before registering.
+  </Accordion>
+
+  <Accordion title="CommitmentTooOld error">
+    Your commitment has expired. Commitments are valid for `MAX_COMMITMENT_AGE` (typically 24 hours). Submit a new commitment.
+  </Accordion>
+
+  <Accordion title="NameAlreadyRegistered error">
+    The name is already registered and not expired. Check `getExpiry()` to see when it expires.
+  </Accordion>
+
+  <Accordion title="Token ID changed after granting roles">
+    This is expected behavior. Token IDs are regenerated when roles change to prevent NFT marketplace griefing attacks. Use `getTokenId()` to always get the current token ID.
+  </Accordion>
+</AccordionGroup>

@@ -1,0 +1,521 @@
+---
+title: 'IRegistry'
+description: 'Core registry interface for ENS v2 domain management'
+icon: 'database'
+---
+
+## Overview
+
+The `IRegistry` interface is the foundational contract interface for ENS v2 registry functionality. It extends `IERC1155Singleton` to provide ERC1155-compliant token management for domain names while adding registry-specific features for subdomains, resolvers, and parent-child relationships.
+
+**Interface Selector:** `0x51f67f40`
+
+## Inheritance
+
+```solidity
+interface IRegistry is IERC1155Singleton
+```
+
+- Inherits from `IERC1155Singleton` for ERC1155 token functionality
+- Adds `ownerOf(uint256 id)` for single-owner token queries
+
+## Events
+
+### NameRegistered
+
+Emitted when a subdomain is registered.
+
+```solidity
+event NameRegistered(
+    uint256 indexed tokenId,
+    bytes32 indexed labelHash,
+    string label,
+    address owner,
+    uint64 expiry,
+    address indexed sender
+);
+```
+
+<ResponseField name="tokenId" type="uint256" required>
+  The unique token ID for the registered name.
+</ResponseField>
+
+<ResponseField name="labelHash" type="bytes32" required>
+  Keccak256 hash of the label.
+</ResponseField>
+
+<ResponseField name="label" type="string" required>
+  The human-readable label that was registered.
+</ResponseField>
+
+<ResponseField name="owner" type="address" required>
+  The address that owns the registered name.
+</ResponseField>
+
+<ResponseField name="expiry" type="uint64" required>
+  The expiration timestamp for the registration.
+</ResponseField>
+
+<ResponseField name="sender" type="address" required>
+  The address that initiated the registration.
+</ResponseField>
+
+**Example:**
+
+```solidity
+// Listening for name registrations
+registry.on("NameRegistered", (tokenId, labelHash, label, owner, expiry, sender) => {
+    console.log(`Name ${label} registered with token ID ${tokenId}`);
+    console.log(`Owner: ${owner}, Expires: ${expiry}`);
+});
+```
+
+### NameReserved
+
+Emitted when a subdomain is reserved.
+
+```solidity
+event NameReserved(
+    uint256 indexed tokenId,
+    bytes32 indexed labelHash,
+    string label,
+    uint64 expiry,
+    address indexed sender
+);
+```
+
+<ResponseField name="tokenId" type="uint256" required>
+  The unique token ID for the reserved name.
+</ResponseField>
+
+<ResponseField name="labelHash" type="bytes32" required>
+  Keccak256 hash of the label.
+</ResponseField>
+
+<ResponseField name="label" type="string" required>
+  The human-readable label that was reserved.
+</ResponseField>
+
+<ResponseField name="expiry" type="uint64" required>
+  The expiration timestamp for the reservation.
+</ResponseField>
+
+<ResponseField name="sender" type="address" required>
+  The address that reserved the name.
+</ResponseField>
+
+**Example:**
+
+```solidity
+// Reserve a name without assigning ownership
+IPermissionedRegistry(registry).reserve("premium", block.timestamp + 365 days);
+// Emits: NameReserved(tokenId, keccak256("premium"), "premium", expiry, msg.sender)
+```
+
+### NameUnregistered
+
+Emitted when a subdomain is unregistered.
+
+```solidity
+event NameUnregistered(uint256 indexed tokenId, address indexed sender);
+```
+
+<ResponseField name="tokenId" type="uint256" required>
+  The token ID of the unregistered name.
+</ResponseField>
+
+<ResponseField name="sender" type="address" required>
+  The address that initiated the unregistration.
+</ResponseField>
+
+**Example:**
+
+```solidity
+// Unregister a name
+IStandardRegistry(registry).unregister(tokenId);
+// Emits: NameUnregistered(tokenId, msg.sender)
+```
+
+### ExpiryUpdated
+
+Emitted when a name's expiry is changed.
+
+```solidity
+event ExpiryUpdated(uint256 indexed tokenId, uint64 newExpiry, address indexed sender);
+```
+
+<ResponseField name="tokenId" type="uint256" required>
+  The token ID of the name being renewed.
+</ResponseField>
+
+<ResponseField name="newExpiry" type="uint64" required>
+  The new expiration timestamp.
+</ResponseField>
+
+<ResponseField name="sender" type="address" required>
+  The address that updated the expiry.
+</ResponseField>
+
+**Example:**
+
+```solidity
+// Renew a name for another year
+uint64 newExpiry = uint64(block.timestamp + 365 days);
+IStandardRegistry(registry).renew(tokenId, newExpiry);
+// Emits: ExpiryUpdated(tokenId, newExpiry, msg.sender)
+```
+
+### SubregistryUpdated
+
+Emitted when a subdomain's subregistry is changed.
+
+```solidity
+event SubregistryUpdated(
+    uint256 indexed tokenId,
+    IRegistry subregistry,
+    address indexed sender
+);
+```
+
+<ResponseField name="tokenId" type="uint256" required>
+  The token ID of the name.
+</ResponseField>
+
+<ResponseField name="subregistry" type="IRegistry" required>
+  The new subregistry contract address. Can be `address(0)` to remove subregistry.
+</ResponseField>
+
+<ResponseField name="sender" type="address" required>
+  The address that updated the subregistry.
+</ResponseField>
+
+**Example:**
+
+```solidity
+// Set a subregistry for a name
+IStandardRegistry(registry).setSubregistry(tokenId, IRegistry(subregistryAddress));
+// Emits: SubregistryUpdated(tokenId, subregistryAddress, msg.sender)
+
+// Remove subregistry
+IStandardRegistry(registry).setSubregistry(tokenId, IRegistry(address(0)));
+// Emits: SubregistryUpdated(tokenId, address(0), msg.sender)
+```
+
+### ResolverUpdated
+
+Emitted when a name's resolver is changed.
+
+```solidity
+event ResolverUpdated(uint256 indexed tokenId, address resolver, address indexed sender);
+```
+
+<ResponseField name="tokenId" type="uint256" required>
+  The token ID of the name.
+</ResponseField>
+
+<ResponseField name="resolver" type="address" required>
+  The new resolver contract address. Can be `address(0)` to remove resolver.
+</ResponseField>
+
+<ResponseField name="sender" type="address" required>
+  The address that updated the resolver.
+</ResponseField>
+
+**Example:**
+
+```solidity
+// Set a resolver for a name
+IStandardRegistry(registry).setResolver(tokenId, resolverAddress);
+// Emits: ResolverUpdated(tokenId, resolverAddress, msg.sender)
+
+// Remove resolver
+IStandardRegistry(registry).setResolver(tokenId, address(0));
+// Emits: ResolverUpdated(tokenId, address(0), msg.sender)
+```
+
+### TokenRegenerated
+
+Emitted when a token is regenerated with a new token ID.
+
+```solidity
+event TokenRegenerated(uint256 indexed oldTokenId, uint256 indexed newTokenId);
+```
+
+<ResponseField name="oldTokenId" type="uint256" required>
+  The previous token ID.
+</ResponseField>
+
+<ResponseField name="newTokenId" type="uint256" required>
+  The new token ID after regeneration.
+</ResponseField>
+
+<Info>
+  Token regeneration occurs when roles are granted or revoked to maintain ERC1155 compliance. The token ID encodes role information, so role changes require a new token ID.
+</Info>
+
+**Example:**
+
+```solidity
+// Granting roles may trigger token regeneration
+IPermissionedRegistry(registry).grantRoles(resource, roleBitmap, account);
+// May emit: TokenRegenerated(oldTokenId, newTokenId)
+```
+
+### ParentUpdated
+
+Emitted when the registry's parent is changed.
+
+```solidity
+event ParentUpdated(IRegistry indexed parent, string label, address indexed sender);
+```
+
+<ResponseField name="parent" type="IRegistry" required>
+  The new parent registry contract.
+</ResponseField>
+
+<ResponseField name="label" type="string" required>
+  The label of this registry under the parent.
+</ResponseField>
+
+<ResponseField name="sender" type="address" required>
+  The address that updated the parent.
+</ResponseField>
+
+**Example:**
+
+```solidity
+// Set the canonical parent for this registry
+IStandardRegistry(registry).setParent(IRegistry(parentRegistry), "subdomain");
+// Emits: ParentUpdated(parentRegistry, "subdomain", msg.sender)
+```
+
+## Functions
+
+### getSubregistry
+
+Fetches the registry for a subdomain.
+
+```solidity
+function getSubregistry(string calldata label) external view returns (IRegistry);
+```
+
+<ParamField path="query.label" type="string" required>
+  The label to resolve.
+</ParamField>
+
+<ResponseField name="return" type="IRegistry">
+  The address of the registry for this subdomain, or `address(0)` if none exists.
+</ResponseField>
+
+**Example:**
+
+```solidity
+// Get the subregistry for a label
+IRegistry subregistry = registry.getSubregistry("wallet");
+
+if (address(subregistry) != address(0)) {
+    // Subregistry exists, can query further subdomains
+    address resolver = subregistry.getResolver("alice");
+}
+```
+
+### getResolver
+
+Fetches the resolver responsible for the specified label.
+
+```solidity
+function getResolver(string calldata label) external view returns (address);
+```
+
+<ParamField path="query.label" type="string" required>
+  The label to fetch a resolver for.
+</ParamField>
+
+<ResponseField name="return" type="address">
+  The address of a resolver responsible for this name, or `address(0)` if none exists.
+</ResponseField>
+
+**Example:**
+
+```solidity
+// Get the resolver for a label
+address resolver = registry.getResolver("alice");
+
+if (resolver != address(0)) {
+    // Resolver exists, can query records
+    bytes memory addr = IResolver(resolver).resolve(
+        abi.encodeWithSignature("addr(bytes32)", node)
+    );
+}
+```
+
+### getParent
+
+Get canonical location of this registry.
+
+```solidity
+function getParent() external view returns (IRegistry parent, string memory label);
+```
+
+<ResponseField name="parent" type="IRegistry">
+  The canonical parent registry of this registry.
+</ResponseField>
+
+<ResponseField name="label" type="string">
+  The canonical label of this registry under its parent.
+</ResponseField>
+
+**Example:**
+
+```solidity
+// Get the parent information
+(IRegistry parent, string memory label) = registry.getParent();
+
+console.log("This registry is registered as", label, "under parent", address(parent));
+
+// Build full domain path
+if (address(parent) != address(0)) {
+    (IRegistry grandparent, string memory parentLabel) = parent.getParent();
+    // Domain path: label.parentLabel.eth
+}
+```
+
+## Usage Examples
+
+### Query domain information
+
+```solidity
+import {IRegistry} from "./interfaces/IRegistry.sol";
+
+contract DomainQuery {
+    IRegistry public registry;
+
+    constructor(address _registry) {
+        registry = IRegistry(_registry);
+    }
+
+    function queryDomain(string calldata label) external view returns (
+        address resolver,
+        IRegistry subregistry,
+        IRegistry parent,
+        string memory parentLabel
+    ) {
+        // Get resolver and subregistry
+        resolver = registry.getResolver(label);
+        subregistry = registry.getSubregistry(label);
+
+        // Get parent information
+        (parent, parentLabel) = registry.getParent();
+
+        return (resolver, subregistry, parent, parentLabel);
+    }
+}
+```
+
+### Listen to registry events
+
+```solidity
+import {IRegistry} from "./interfaces/IRegistry.sol";
+
+contract RegistryMonitor {
+    IRegistry public registry;
+
+    event DomainActivity(string action, uint256 tokenId, address user);
+
+    constructor(address _registry) {
+        registry = IRegistry(_registry);
+    }
+
+    function monitorRegistry() external {
+        // In practice, use event filters with web3/ethers
+        // This pseudocode demonstrates the concept
+
+        registry.on("NameRegistered", (tokenId, labelHash, label, owner, expiry, sender) => {
+            emit DomainActivity("registered", tokenId, owner);
+        });
+
+        registry.on("NameUnregistered", (tokenId, sender) => {
+            emit DomainActivity("unregistered", tokenId, sender);
+        });
+
+        registry.on("ExpiryUpdated", (tokenId, newExpiry, sender) => {
+            emit DomainActivity("renewed", tokenId, sender);
+        });
+    }
+}
+```
+
+### Navigate registry hierarchy
+
+```solidity
+import {IRegistry} from "./interfaces/IRegistry.sol";
+
+contract RegistryNavigator {
+    // Resolve a multi-level domain path
+    function resolvePath(IRegistry rootRegistry, string[] calldata labels)
+        external
+        view
+        returns (address finalResolver)
+    {
+        IRegistry currentRegistry = rootRegistry;
+
+        for (uint256 i = 0; i < labels.length; i++) {
+            if (i == labels.length - 1) {
+                // Last label, get its resolver
+                finalResolver = currentRegistry.getResolver(labels[i]);
+            } else {
+                // Intermediate label, navigate to subregistry
+                currentRegistry = currentRegistry.getSubregistry(labels[i]);
+                require(
+                    address(currentRegistry) != address(0),
+                    "Subregistry not found"
+                );
+            }
+        }
+
+        return finalResolver;
+    }
+
+    // Build full domain path from root
+    function buildFullPath(IRegistry registry)
+        external
+        view
+        returns (string[] memory path)
+    {
+        // Count depth
+        uint256 depth = 0;
+        IRegistry current = registry;
+        while (address(current) != address(0)) {
+            depth++;
+            (IRegistry parent,) = current.getParent();
+            current = parent;
+        }
+
+        // Build path array
+        path = new string[](depth);
+        current = registry;
+        for (uint256 i = depth; i > 0; i--) {
+            (IRegistry parent, string memory label) = current.getParent();
+            path[i - 1] = label;
+            current = parent;
+        }
+
+        return path;
+    }
+}
+```
+
+## Related Interfaces
+
+<Columns cols={2}>
+  <Card title="IPermissionedRegistry" icon="shield-halved" href="/api/interfaces/ipermissioned-registry">
+    Registry with role-based access control.
+  </Card>
+  <Card title="ERC1155Singleton" icon="fingerprint" href="/api/erc1155/erc1155-singleton">
+    Base ERC1155 contract with single-owner functionality.
+  </Card>
+</Columns>
+
+<Note>
+  The `IRegistry` interface provides read-only queries for registry state. For registration and modification operations, use `IPermissionedRegistry`.
+</Note>

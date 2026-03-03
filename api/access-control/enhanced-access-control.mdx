@@ -1,0 +1,760 @@
+---
+title: 'EnhancedAccessControl'
+description: 'Enhanced access control system with resource-based roles and bitmap storage'
+icon: 'shield-halved'
+---
+
+## Overview
+
+The `EnhancedAccessControl` contract provides a sophisticated role-based access control system with the following features:
+
+- **Resource-based roles**: Roles can be assigned per resource (identified by `uint256`)
+- **Root resource override**: Role assignments in `ROOT_RESOURCE` (0x0) automatically apply to all resources
+- **Bitmap storage**: Efficient storage using bitmaps for up to 32 roles and 32 admin roles
+- **Assignee tracking**: Track up to 15 assignees per role with built-in counting
+- **Admin role hierarchy**: Each role has a corresponding admin role that can grant/revoke it
+
+### Role Representation
+
+- A role bitmap is a `uint256` where:
+  - Lower 128 bits represent regular roles (0-31)
+  - Upper 128 bits represent admin roles (32-63)
+- Each role is represented by a nybble (4 bits) in little-endian order
+- If a role's left-most nybble bit is at index N, its admin role nybble starts at bit position `N << 128`
+
+## Constants
+
+### ROOT_RESOURCE
+
+```solidity
+uint256 public constant ROOT_RESOURCE = 0
+```
+
+The root resource identifier. Role assignments in this resource apply globally to all resources.
+
+## Events
+
+### EACRolesChanged
+
+```solidity
+event EACRolesChanged(
+    uint256 indexed resource,
+    address indexed account,
+    uint256 oldRoleBitmap,
+    uint256 newRoleBitmap
+)
+```
+
+Emitted when an account's roles are modified within a resource.
+
+<ParamField path="resource" type="uint256">
+  The resource identifier where roles were changed
+</ParamField>
+
+<ParamField path="account" type="address">
+  The account whose roles were modified
+</ParamField>
+
+<ParamField path="oldRoleBitmap" type="uint256">
+  The previous role bitmap before the change
+</ParamField>
+
+<ParamField path="newRoleBitmap" type="uint256">
+  The new role bitmap after the change
+</ParamField>
+
+## Errors
+
+### EACUnauthorizedAccountRoles
+
+```solidity
+error EACUnauthorizedAccountRoles(uint256 resource, uint256 roleBitmap, address account)
+```
+
+Thrown when an account lacks required roles for an operation.
+
+**Error selector**: `0x4b27a133`
+
+### EACCannotGrantRoles
+
+```solidity
+error EACCannotGrantRoles(uint256 resource, uint256 roleBitmap, address account)
+```
+
+Thrown when an account attempts to grant roles without the necessary admin roles.
+
+**Error selector**: `0xd1a3b355`
+
+### EACCannotRevokeRoles
+
+```solidity
+error EACCannotRevokeRoles(uint256 resource, uint256 roleBitmap, address account)
+```
+
+Thrown when an account attempts to revoke roles without the necessary admin roles.
+
+**Error selector**: `0xa604e318`
+
+### EACRootResourceNotAllowed
+
+```solidity
+error EACRootResourceNotAllowed()
+```
+
+Thrown when attempting to use `grantRoles` or `revokeRoles` with `ROOT_RESOURCE`. Use `grantRootRoles` or `revokeRootRoles` instead.
+
+**Error selector**: `0xc2842458`
+
+### EACMaxAssignees
+
+```solidity
+error EACMaxAssignees(uint256 resource, uint256 role)
+```
+
+Thrown when attempting to grant a role that has reached the maximum of 15 assignees.
+
+**Error selector**: `0xf9165348`
+
+### EACMinAssignees
+
+```solidity
+error EACMinAssignees(uint256 resource, uint256 role)
+```
+
+Thrown when attempting to revoke a role that would result in negative assignee count.
+
+**Error selector**: `0x1f80c19b`
+
+### EACInvalidRoleBitmap
+
+```solidity
+error EACInvalidRoleBitmap(uint256 roleBitmap)
+```
+
+Thrown when a role bitmap contains invalid role bits.
+
+**Error selector**: `0x2a7b2d20`
+
+### EACInvalidAccount
+
+```solidity
+error EACInvalidAccount()
+```
+
+Thrown when attempting to grant roles to the zero address.
+
+**Error selector**: `0xec3fc592`
+
+## Functions
+
+### grantRoles
+
+```solidity
+function grantRoles(
+    uint256 resource,
+    uint256 roleBitmap,
+    address account
+) public virtual returns (bool)
+```
+
+Grants all roles in the given role bitmap to an account within a specific resource.
+
+**Requirements**:
+- Caller must have the admin roles for all roles being granted
+- Cannot be used with `ROOT_RESOURCE` (use `grantRootRoles` instead)
+- Account cannot be the zero address
+- Roles must not exceed maximum assignees (15 per role)
+
+<ParamField path="resource" type="uint256">
+  The resource identifier to grant roles within (cannot be `ROOT_RESOURCE`)
+</ParamField>
+
+<ParamField path="roleBitmap" type="uint256">
+  The bitmap of roles to grant
+</ParamField>
+
+<ParamField path="account" type="address">
+  The account to grant roles to
+</ParamField>
+
+<ResponseField name="return" type="bool">
+  Returns `true` if roles were granted, `false` if the account already had all the roles
+</ResponseField>
+
+**Example**:
+
+```solidity
+// Grant ROLE_REGISTRAR to an address for a specific name
+uint256 nameId = uint256(keccak256("vitalik.eth"));
+bool granted = registry.grantRoles(
+    nameId,
+    RegistryRolesLib.ROLE_REGISTRAR,
+    0x1234567890123456789012345678901234567890
+);
+```
+
+### grantRootRoles
+
+```solidity
+function grantRootRoles(
+    uint256 roleBitmap,
+    address account
+) public virtual returns (bool)
+```
+
+Grants all roles in the given role bitmap to an account in the `ROOT_RESOURCE`. Roles granted in the root resource apply to all resources.
+
+**Requirements**:
+- Caller must have the admin roles for all roles being granted
+- Account cannot be the zero address
+- Roles must not exceed maximum assignees (15 per role)
+
+<ParamField path="roleBitmap" type="uint256">
+  The bitmap of roles to grant
+</ParamField>
+
+<ParamField path="account" type="address">
+  The account to grant roles to
+</ParamField>
+
+<ResponseField name="return" type="bool">
+  Returns `true` if roles were granted, `false` if the account already had all the roles
+</ResponseField>
+
+**Example**:
+
+```solidity
+// Grant global ROLE_REGISTRAR_ADMIN to deployer
+bool granted = registry.grantRootRoles(
+    RegistryRolesLib.ROLE_REGISTRAR_ADMIN,
+    msg.sender
+);
+```
+
+### revokeRoles
+
+```solidity
+function revokeRoles(
+    uint256 resource,
+    uint256 roleBitmap,
+    address account
+) public virtual returns (bool)
+```
+
+Revokes all roles in the given role bitmap from an account within a specific resource.
+
+**Requirements**:
+- Caller must have the admin roles for all roles being revoked
+- Cannot be used with `ROOT_RESOURCE` (use `revokeRootRoles` instead)
+
+<ParamField path="resource" type="uint256">
+  The resource identifier to revoke roles within (cannot be `ROOT_RESOURCE`)
+</ParamField>
+
+<ParamField path="roleBitmap" type="uint256">
+  The bitmap of roles to revoke
+</ParamField>
+
+<ParamField path="account" type="address">
+  The account to revoke roles from
+</ParamField>
+
+<ResponseField name="return" type="bool">
+  Returns `true` if roles were revoked, `false` if the account didn't have any of the roles
+</ResponseField>
+
+**Example**:
+
+```solidity
+// Revoke ROLE_REGISTRAR from an address
+uint256 nameId = uint256(keccak256("vitalik.eth"));
+bool revoked = registry.revokeRoles(
+    nameId,
+    RegistryRolesLib.ROLE_REGISTRAR,
+    0x1234567890123456789012345678901234567890
+);
+```
+
+### revokeRootRoles
+
+```solidity
+function revokeRootRoles(
+    uint256 roleBitmap,
+    address account
+) public virtual returns (bool)
+```
+
+Revokes all roles in the given role bitmap from an account in the `ROOT_RESOURCE`.
+
+**Requirements**:
+- Caller must have the admin roles for all roles being revoked
+
+<ParamField path="roleBitmap" type="uint256">
+  The bitmap of roles to revoke
+</ParamField>
+
+<ParamField path="account" type="address">
+  The account to revoke roles from
+</ParamField>
+
+<ResponseField name="return" type="bool">
+  Returns `true` if roles were revoked, `false` if the account didn't have any of the roles
+</ResponseField>
+
+**Example**:
+
+```solidity
+// Revoke global ROLE_REGISTRAR from an address
+bool revoked = registry.revokeRootRoles(
+    RegistryRolesLib.ROLE_REGISTRAR,
+    0x1234567890123456789012345678901234567890
+);
+```
+
+### roles
+
+```solidity
+function roles(uint256 resource, address account) public view virtual returns (uint256)
+```
+
+Returns the role bitmap for an account within a specific resource.
+
+<ParamField path="resource" type="uint256">
+  The resource identifier to query
+</ParamField>
+
+<ParamField path="account" type="address">
+  The account to query
+</ParamField>
+
+<ResponseField name="return" type="uint256">
+  The role bitmap for the account in the specified resource
+</ResponseField>
+
+**Example**:
+
+```solidity
+uint256 nameId = uint256(keccak256("vitalik.eth"));
+uint256 accountRoles = registry.roles(nameId, msg.sender);
+
+// Check if has ROLE_REGISTRAR
+bool hasRegistrarRole = (accountRoles & RegistryRolesLib.ROLE_REGISTRAR) != 0;
+```
+
+### roleCount
+
+```solidity
+function roleCount(uint256 resource) public view virtual returns (uint256)
+```
+
+Returns the role count bitmap for a resource. Each role's assignee count is represented by 4 bits in little-endian order.
+
+<ParamField path="resource" type="uint256">
+  The resource identifier to query
+</ParamField>
+
+<ResponseField name="return" type="uint256">
+  The role count bitmap where each 4-bit nybble represents the number of assignees for that role (max 15)
+</ResponseField>
+
+**Example**:
+
+```solidity
+uint256 nameId = uint256(keccak256("vitalik.eth"));
+uint256 counts = registry.roleCount(nameId);
+
+// Extract count for ROLE_REGISTRAR (role 0)
+uint256 registrarCount = counts & 0xF; // First 4 bits
+```
+
+### hasRootRoles
+
+```solidity
+function hasRootRoles(uint256 roleBitmap, address account) public view virtual returns (bool)
+```
+
+Checks if an account has been granted all the specified roles in the `ROOT_RESOURCE`.
+
+<ParamField path="roleBitmap" type="uint256">
+  The bitmap of roles to check
+</ParamField>
+
+<ParamField path="account" type="address">
+  The account to check
+</ParamField>
+
+<ResponseField name="return" type="bool">
+  Returns `true` if the account has all specified roles in `ROOT_RESOURCE`, `false` otherwise
+</ResponseField>
+
+**Example**:
+
+```solidity
+bool isGlobalAdmin = registry.hasRootRoles(
+    RegistryRolesLib.ROLE_REGISTRAR_ADMIN,
+    msg.sender
+);
+```
+
+### hasRoles
+
+```solidity
+function hasRoles(
+    uint256 resource,
+    uint256 roleBitmap,
+    address account
+) public view virtual returns (bool)
+```
+
+Checks if an account has been granted all the specified roles in either the given resource or the `ROOT_RESOURCE`.
+
+<ParamField path="resource" type="uint256">
+  The resource identifier to check
+</ParamField>
+
+<ParamField path="roleBitmap" type="uint256">
+  The bitmap of roles to check
+</ParamField>
+
+<ParamField path="account" type="address">
+  The account to check
+</ParamField>
+
+<ResponseField name="return" type="bool">
+  Returns `true` if the account has all specified roles in either the resource or `ROOT_RESOURCE`, `false` otherwise
+</ResponseField>
+
+**Example**:
+
+```solidity
+uint256 nameId = uint256(keccak256("vitalik.eth"));
+bool canRegister = registry.hasRoles(
+    nameId,
+    RegistryRolesLib.ROLE_REGISTRAR,
+    msg.sender
+);
+```
+
+### hasAssignees
+
+```solidity
+function hasAssignees(uint256 resource, uint256 roleBitmap) public view virtual returns (bool)
+```
+
+Checks if any of the roles in the given role bitmap has at least one assignee in the specified resource.
+
+<ParamField path="resource" type="uint256">
+  The resource identifier to check
+</ParamField>
+
+<ParamField path="roleBitmap" type="uint256">
+  The bitmap of roles to check
+</ParamField>
+
+<ResponseField name="return" type="bool">
+  Returns `true` if any role in the bitmap has assignees, `false` otherwise
+</ResponseField>
+
+**Example**:
+
+```solidity
+uint256 nameId = uint256(keccak256("vitalik.eth"));
+bool hasRegistrars = registry.hasAssignees(
+    nameId,
+    RegistryRolesLib.ROLE_REGISTRAR
+);
+```
+
+### getAssigneeCount
+
+```solidity
+function getAssigneeCount(
+    uint256 resource,
+    uint256 roleBitmap
+) public view virtual returns (uint256 counts, uint256 mask)
+```
+
+Gets the number of assignees for each role in the given role bitmap.
+
+<ParamField path="resource" type="uint256">
+  The resource identifier to query
+</ParamField>
+
+<ParamField path="roleBitmap" type="uint256">
+  The bitmap of roles to query
+</ParamField>
+
+<ResponseField name="counts" type="uint256">
+  The number of assignees for each role, expressed as a packed array of 4-bit integers
+</ResponseField>
+
+<ResponseField name="mask" type="uint256">
+  The mask corresponding to the given role bitmap
+</ResponseField>
+
+**Example**:
+
+```solidity
+uint256 nameId = uint256(keccak256("vitalik.eth"));
+(uint256 counts, uint256 mask) = registry.getAssigneeCount(
+    nameId,
+    RegistryRolesLib.ROLE_REGISTRAR
+);
+
+// Extract the count for ROLE_REGISTRAR
+uint256 registrarCount = counts & 0xF;
+```
+
+### supportsInterface
+
+```solidity
+function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool)
+```
+
+Returns true if the contract implements the interface defined by `interfaceId`. Supports `IEnhancedAccessControl` interface.
+
+<ParamField path="interfaceId" type="bytes4">
+  The interface identifier to check
+</ParamField>
+
+<ResponseField name="return" type="bool">
+  Returns `true` if the contract implements the interface, `false` otherwise
+</ResponseField>
+
+## Modifiers
+
+### onlyRoles
+
+```solidity
+modifier onlyRoles(uint256 resource, uint256 roleBitmap)
+```
+
+Requires that the caller has all the specified roles within the given resource or `ROOT_RESOURCE`.
+
+**Example**:
+
+```solidity
+function registerName(uint256 nameId, string memory name) 
+    public 
+    onlyRoles(nameId, RegistryRolesLib.ROLE_REGISTRAR) 
+{
+    // Only accounts with ROLE_REGISTRAR for this name can execute
+}
+```
+
+### onlyRootRoles
+
+```solidity
+modifier onlyRootRoles(uint256 roleBitmap)
+```
+
+Requires that the caller has all the specified roles within the `ROOT_RESOURCE`.
+
+**Example**:
+
+```solidity
+function setGlobalConfig() 
+    public 
+    onlyRootRoles(RegistryRolesLib.ROLE_UPGRADE_ADMIN) 
+{
+    // Only accounts with global ROLE_UPGRADE_ADMIN can execute
+}
+```
+
+### canGrantRoles
+
+```solidity
+modifier canGrantRoles(uint256 resource, uint256 roleBitmap)
+```
+
+Requires that the caller has the admin roles necessary to grant all the specified roles.
+
+### canRevokeRoles
+
+```solidity
+modifier canRevokeRoles(uint256 resource, uint256 roleBitmap)
+```
+
+Requires that the caller has the admin roles necessary to revoke all the specified roles.
+
+## Internal Functions
+
+### _grantRoles
+
+```solidity
+function _grantRoles(
+    uint256 resource,
+    uint256 roleBitmap,
+    address account,
+    bool executeCallbacks
+) internal virtual returns (bool)
+```
+
+Internal function to grant roles without access control checks. Used by inheriting contracts.
+
+### _revokeRoles
+
+```solidity
+function _revokeRoles(
+    uint256 resource,
+    uint256 roleBitmap,
+    address account,
+    bool executeCallbacks
+) internal virtual returns (bool)
+```
+
+Internal function to revoke roles without access control checks. Used by inheriting contracts.
+
+### _revokeAllRoles
+
+```solidity
+function _revokeAllRoles(
+    uint256 resource,
+    address account,
+    bool executeCallbacks
+) internal virtual returns (bool)
+```
+
+Internal function to revoke all roles from an account within a resource.
+
+### _transferRoles
+
+```solidity
+function _transferRoles(
+    uint256 resource,
+    address srcAccount,
+    address dstAccount,
+    bool executeCallbacks
+) internal virtual
+```
+
+Transfers all roles from `srcAccount` to `dstAccount` within the same resource. First revokes roles from source, then grants to destination to avoid exceeding max assignee limits.
+
+### _onRolesGranted
+
+```solidity
+function _onRolesGranted(
+    uint256 resource,
+    address account,
+    uint256 oldRoles,
+    uint256 newRoles,
+    uint256 roleBitmap
+) internal virtual
+```
+
+Callback hook called when roles are granted. Can be overridden by inheriting contracts to implement custom logic.
+
+### _onRolesRevoked
+
+```solidity
+function _onRolesRevoked(
+    uint256 resource,
+    address account,
+    uint256 oldRoles,
+    uint256 newRoles,
+    uint256 roleBitmap
+) internal virtual
+```
+
+Callback hook called when roles are revoked. Can be overridden by inheriting contracts to implement custom logic.
+
+### _checkRoles
+
+```solidity
+function _checkRoles(
+    uint256 resource,
+    uint256 roleBitmap,
+    address account
+) internal view virtual
+```
+
+Reverts if the account does not have all the specified roles. Used internally by modifiers.
+
+### _checkCanGrantRoles
+
+```solidity
+function _checkCanGrantRoles(
+    uint256 resource,
+    uint256 roleBitmap,
+    address account
+) internal view virtual
+```
+
+Reverts if the account does not have the admin roles necessary to grant all the specified roles.
+
+### _checkCanRevokeRoles
+
+```solidity
+function _checkCanRevokeRoles(
+    uint256 resource,
+    uint256 roleBitmap,
+    address account
+) internal view virtual
+```
+
+Reverts if the account does not have the admin roles necessary to revoke all the specified roles.
+
+### _getSettableRoles
+
+```solidity
+function _getSettableRoles(
+    uint256 resource,
+    address account
+) internal view virtual returns (uint256)
+```
+
+Returns the roles (both regular and admin) that an account can grant. An account can grant a regular role if they have the corresponding admin role, and can grant an admin role if they have that same admin role.
+
+### _getRevokableRoles
+
+```solidity
+function _getRevokableRoles(
+    uint256 resource,
+    address account
+) internal view virtual returns (uint256)
+```
+
+Returns the roles (including admin roles) that an account can revoke.
+
+## Usage Patterns
+
+### Checking Multiple Roles
+
+```solidity
+// Check if account has both ROLE_REGISTRAR and ROLE_RENEW
+uint256 requiredRoles = RegistryRolesLib.ROLE_REGISTRAR | RegistryRolesLib.ROLE_RENEW;
+bool hasAll = registry.hasRoles(nameId, requiredRoles, account);
+```
+
+### Granting Multiple Roles at Once
+
+```solidity
+// Grant both ROLE_REGISTRAR and ROLE_RENEW in one transaction
+uint256 rolesToGrant = RegistryRolesLib.ROLE_REGISTRAR | RegistryRolesLib.ROLE_RENEW;
+registry.grantRoles(nameId, rolesToGrant, account);
+```
+
+### Setting Up Role Hierarchy
+
+```solidity
+// First grant admin role to yourself
+registry.grantRootRoles(RegistryRolesLib.ROLE_REGISTRAR_ADMIN, msg.sender);
+
+// Now you can grant ROLE_REGISTRAR to others
+registry.grantRootRoles(RegistryRolesLib.ROLE_REGISTRAR, otherAccount);
+```
+
+### Resource-Specific Permissions
+
+```solidity
+// Grant permission for a specific name only
+uint256 nameId = uint256(keccak256("vitalik.eth"));
+registry.grantRoles(nameId, RegistryRolesLib.ROLE_RESOLVER, account);
+
+// This permission only applies to "vitalik.eth", not other names
+```
+
+## See Also
+
+- [RegistryRolesLib](/api/access-control/registry-roles-lib) - Registry-specific role definitions
+- Source: `contracts/src/access-control/EnhancedAccessControl.sol:26`

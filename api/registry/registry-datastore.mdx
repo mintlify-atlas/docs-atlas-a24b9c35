@@ -1,0 +1,359 @@
+---
+title: 'Registry Datastore'
+description: 'Internal storage structure and data management for PermissionedRegistry'
+---
+
+## Overview
+
+The Registry Datastore is not a separate contract but rather the internal storage architecture used by PermissionedRegistry. It manages the persistent state for all registered names through an efficient mapping-based structure.
+
+## Storage Architecture
+
+### Entry Structure
+
+Each registered name is stored as an `Entry` struct, which contains all the metadata and state for that name:
+
+```solidity
+struct Entry {
+    uint32 eacVersionId;
+    uint32 tokenVersionId;
+    IRegistry subregistry;
+    uint64 expiry;
+    address resolver;
+}
+```
+
+<ParamField path="eacVersionId" type="uint32">
+  **Enhanced Access Control Version ID**
+  
+  Incremented each time the name is unregistered or burned. This ensures that access control resources are invalidated when a name expires and is re-registered, preventing old permissions from carrying over.
+</ParamField>
+
+<ParamField path="tokenVersionId" type="uint32">
+  **Token Version ID**
+  
+  Incremented whenever:
+  - The name is unregistered/burned
+  - Roles are granted or revoked (triggers token regeneration)
+  
+  This maintains ERC1155 compliance by ensuring each unique permission state has a unique token ID.
+</ParamField>
+
+<ParamField path="subregistry" type="IRegistry">
+  **Subregistry Contract**
+  
+  The registry contract that manages subdomains for this name. For example, if this entry represents "alice.eth", the subregistry would handle names like "sub.alice.eth".
+  
+  Set to `address(0)` if no subregistry exists.
+</ParamField>
+
+<ParamField path="expiry" type="uint64">
+  **Expiration Timestamp**
+  
+  Unix timestamp when the registration expires. After this time:
+  - The name becomes AVAILABLE
+  - Queries return address(0) for owner, resolver, and subregistry
+  - The name can be re-registered
+</ParamField>
+
+<ParamField path="resolver" type="address">
+  **Resolver Contract**
+  
+  The contract responsible for resolving records (addresses, text records, etc.) for this name.
+  
+  Set to `address(0)` if no resolver is configured.
+</ParamField>
+
+### Storage Mapping
+
+Entries are stored in a mapping from storage ID to Entry:
+
+```solidity
+mapping(uint256 storageId => Entry entry) internal _entries;
+```
+
+The storage ID is derived from the labelhash with version set to 0:
+
+```solidity
+function _entry(uint256 anyId) internal view returns (Entry storage) {
+    return _entries[LibLabel.withVersion(anyId, 0)];
+}
+```
+
+This design allows:
+- Efficient lookups using any form of ID (labelhash, token ID, or resource ID)
+- Version information to be stored separately in the Entry
+- Consistent storage location regardless of token/resource version
+
+### Parent Registry Information
+
+The datastore also maintains the canonical location of the registry in the ENS hierarchy:
+
+```solidity
+IRegistry internal _parent;
+string internal _childLabel;
+```
+
+<ParamField path="_parent" type="IRegistry">
+  The parent registry contract. For example, the parent of a 2LD registry like "alice.eth" would be the ETH registry.
+</ParamField>
+
+<ParamField path="_childLabel" type="string">
+  The label of this registry in the parent. For example, "alice" if this is the "alice.eth" registry.
+</ParamField>
+
+## ID System
+
+The registry uses three types of IDs that can be converted between each other:
+
+### Labelhash
+
+The base identifier, computed as:
+
+```solidity
+uint256 labelId = uint256(keccak256(bytes(label)));
+```
+
+This is the storage key with version bits set to 0.
+
+### Token ID
+
+The ERC1155 token identifier, which includes the token version:
+
+```solidity
+function _constructTokenId(uint256 anyId, Entry storage entry) internal view returns (uint256) {
+    return LibLabel.withVersion(anyId, entry.tokenVersionId);
+}
+```
+
+Token IDs change when:
+- Roles are granted or revoked
+- The name is burned and re-registered
+
+This ensures each unique permission state has a unique token ID, maintaining ERC1155 invariants.
+
+### Resource ID
+
+The Enhanced Access Control resource identifier:
+
+```solidity
+function _constructResource(
+    uint256 anyId,
+    Entry storage entry
+) internal view returns (uint256) {
+    return LibLabel.withVersion(
+        anyId,
+        _isExpired(entry.expiry) ? entry.eacVersionId + 1 : entry.eacVersionId
+    );
+}
+```
+
+Resource IDs:
+- Include the EAC version instead of token version
+- Automatically increment for expired names (even before re-registration)
+- Used for all access control checks
+
+## Version Management
+
+### When Versions Change
+
+**eacVersionId increments when**:
+- Name is unregistered via `unregister()`
+- Name is burned and re-registered via `register()`
+
+This invalidates all previous access control grants.
+
+**tokenVersionId increments when**:
+- Name is unregistered
+- Name is burned and re-registered
+- Roles are granted to any account
+- Roles are revoked from any account
+
+This creates a new token ID for the updated permission state.
+
+### Token Regeneration
+
+When roles change, the token is regenerated:
+
+```solidity
+function _regenerateToken(uint256 anyId) internal {
+    Entry storage entry = _entry(anyId);
+    if (!_isExpired(entry.expiry)) {
+        uint256 tokenId = _constructTokenId(anyId, entry);
+        address owner = super.ownerOf(tokenId);
+        if (owner != address(0)) {
+            _burn(owner, tokenId, 1);
+            ++entry.tokenVersionId;
+            uint256 newTokenId = _constructTokenId(tokenId, entry);
+            _mint(owner, newTokenId, 1, "");
+            emit TokenRegenerated(tokenId, newTokenId);
+        }
+    }
+}
+```
+
+This process:
+1. Burns the old token
+2. Increments the version
+3. Mints a new token with the same owner
+4. Emits `TokenRegenerated` event
+
+The resource ID remains unchanged, preserving access control state.
+
+## State Queries
+
+The datastore supports querying state with any type of ID:
+
+### Direct Entry Access
+
+```solidity
+Entry storage entry = _entry(anyId);
+```
+
+Accepts labelhash, token ID, or resource ID and always returns the same Entry.
+
+### Status Determination
+
+```solidity
+function _constructStatus(uint64 expiry, address owner) internal view returns (Status) {
+    if (_isExpired(expiry)) {
+        return Status.AVAILABLE;
+    } else if (owner == address(0)) {
+        return Status.RESERVED;
+    } else {
+        return Status.REGISTERED;
+    }
+}
+```
+
+Status is derived from:
+- **Expiry time**: Past expiry → AVAILABLE
+- **Owner**: No owner → RESERVED, has owner → REGISTERED
+
+### Expiry Checking
+
+```solidity
+function _isExpired(uint64 expiry) internal view returns (bool) {
+    return block.timestamp >= expiry;
+}
+```
+
+Simple comparison against current block timestamp.
+
+## Data Lifecycle
+
+### Registration (AVAILABLE → REGISTERED)
+
+```solidity
+// New entry or expired entry
+entry.expiry = expiry;
+entry.subregistry = registry;
+entry.resolver = resolver;
+entry.eacVersionId = 0; // or unchanged if new
+entry.tokenVersionId = 0; // or unchanged if new
+```
+
+### Reservation (AVAILABLE → RESERVED)
+
+```solidity
+// Same as registration but no token is minted
+entry.expiry = expiry;
+entry.subregistry = registry;
+entry.resolver = resolver;
+// No token, no roles
+```
+
+### Conversion (RESERVED → REGISTERED)
+
+```solidity
+// Register with owner != address(0)
+if (expiry == 0) {
+    expiry = entry.expiry; // Keep existing expiry
+}
+entry.subregistry = registry;
+entry.resolver = resolver;
+// Mint token and grant roles
+```
+
+### Unregistration (REGISTERED/RESERVED → AVAILABLE)
+
+```solidity
+if (owner != address(0)) {
+    _burn(owner, tokenId, 1);
+    ++entry.eacVersionId;
+    ++entry.tokenVersionId;
+}
+entry.expiry = uint64(block.timestamp); // Set to now
+```
+
+Note: subregistry and resolver are not cleared, but queries will return address(0) due to expiry.
+
+### Renewal (REGISTERED/RESERVED → REGISTERED/RESERVED)
+
+```solidity
+entry.expiry = newExpiry; // Must be > current expiry
+```
+
+## Storage Efficiency
+
+### Packed Storage
+
+The Entry struct is designed for efficient storage packing:
+
+```solidity
+// Slot 1: eacVersionId (32 bits) + tokenVersionId (32 bits) + subregistry (160 bits) = 224 bits
+// Slot 2: expiry (64 bits) + resolver (160 bits) = 224 bits
+```
+
+This uses only 2 storage slots per entry instead of 5 if each field were stored separately.
+
+### Version Bits
+
+Versions use the upper bits of the 256-bit ID:
+
+```solidity
+// LibLabel.withVersion(labelId, version)
+// Combines base ID (lower bits) with version (upper bits)
+```
+
+This allows:
+- Single mapping for all entries
+- Efficient version extraction
+- No additional storage for version tracking
+
+## Access Patterns
+
+### Common Queries
+
+**Get current state**:
+```solidity
+Entry storage entry = _entry(anyId);
+uint256 tokenId = _constructTokenId(anyId, entry);
+uint256 resource = _constructResource(anyId, entry);
+address owner = super.ownerOf(tokenId);
+Status status = _constructStatus(entry.expiry, owner);
+```
+
+**Check expiry**:
+```solidity
+Entry storage entry = _entry(anyId);
+bool expired = _isExpired(entry.expiry);
+```
+
+**Get resolver/subregistry**:
+```solidity
+Entry storage entry = _entry(labelId);
+if (!_isExpired(entry.expiry)) {
+    return entry.resolver; // or entry.subregistry
+}
+return address(0);
+```
+
+## Notes
+
+- All storage is internal to PermissionedRegistry
+- The datastore has no external interface
+- Version management is automatic and transparent to users
+- Storage IDs are normalized to version 0 for consistent access
+- Expired entries are not deleted, just marked as expired
+- Re-registration of expired names reuses the same storage slot

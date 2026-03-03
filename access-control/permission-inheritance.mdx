@@ -1,0 +1,593 @@
+---
+title: Permission Inheritance
+description: How permissions inherit from ROOT_RESOURCE to specific names in ENS v2
+---
+
+One of the most powerful features of EnhancedAccessControl is **permission inheritance** from the ROOT_RESOURCE. This enables hierarchical permission structures where global administrators coexist with name-specific operators.
+
+## The ROOT_RESOURCE
+
+The ROOT_RESOURCE is a special resource with ID `0` that functions as a contract-level permission scope:
+
+```solidity
+uint256 public constant ROOT_RESOURCE = 0;
+```
+
+<Note>
+Any role granted at the ROOT_RESOURCE level automatically applies to **all resources** in the contract.
+</Note>
+
+### Why ROOT_RESOURCE Matters
+
+In ENS v2, each name is a unique resource. Without inheritance, managing permissions would require:
+
+- Granting roles individually for every name
+- Complex delegation patterns for administrators
+- High gas costs for multi-name operations
+
+ROOT_RESOURCE solves this by enabling:
+
+- **Global administrators** with permissions across all names
+- **Service contracts** that operate on any name
+- **Efficient permission checks** using bitwise operations
+
+## Inheritance Mechanism
+
+### Permission Resolution
+
+When checking if an address has a role for a specific resource, EAC combines roles from two sources:
+
+<Steps>
+  <Step title="Fetch Root Roles">
+    Retrieve the roles granted at ROOT_RESOURCE for the address
+  </Step>
+  
+  <Step title="Fetch Resource Roles">
+    Retrieve the roles granted for the specific resource for the address
+  </Step>
+  
+  <Step title="Combine with Bitwise OR">
+    Merge both role bitmaps using bitwise OR operation
+  </Step>
+  
+  <Step title="Check Required Roles">
+    Verify that all required roles are present in the combined bitmap
+  </Step>
+</Steps>
+
+### Implementation
+
+This is the core implementation from `EnhancedAccessControl.sol:189`:
+
+```solidity
+function hasRoles(
+    uint256 resource,
+    uint256 roleBitmap,
+    address account
+) public view virtual returns (bool) {
+    return (
+        (_roles[ROOT_RESOURCE][account] | _roles[resource][account]) & roleBitmap
+    ) == roleBitmap;
+}
+```
+
+Let's break this down:
+
+<CodeGroup>
+```solidity Step 1: Combine Bitmaps
+_roles[ROOT_RESOURCE][account] | _roles[resource][account]
+// Bitwise OR combines root and resource-specific roles
+```
+
+```solidity Step 2: Filter Required Roles
+(combinedRoles) & roleBitmap
+// Bitwise AND extracts only the roles we're checking for
+```
+
+```solidity Step 3: Verify All Present
+(filteredRoles) == roleBitmap
+// Equality check ensures ALL required roles are present
+```
+</CodeGroup>
+
+### Visual Example
+
+Consider Alice with different roles at different levels:
+
+```
+ROOT_RESOURCE roles for Alice:  0x...0001000100000000  (ROLE_RENEW)
+Resource 123 roles for Alice:   0x...0000000100000000  (ROLE_SET_RESOLVER)
+Checking for:                   0x...0001000100000000  (ROLE_RENEW)
+
+Step 1: Combine (OR)
+  0x...0001000100000000
+| 0x...0000000100000000
+= 0x...0001000100000000
+
+Step 2: Filter (AND)
+  0x...0001000100000000
+& 0x...0001000100000000
+= 0x...0001000100000000
+
+Step 3: Compare
+  0x...0001000100000000 == 0x...0001000100000000
+= true ✓ Alice has permission
+```
+
+## Practical Examples
+
+### Example 1: Global Administrator
+
+```solidity
+// Grant Alice global resolver management permission
+registry.grantRootRoles(
+    RegistryRolesLib.ROLE_SET_RESOLVER,
+    alice
+);
+
+// Alice can now set resolver for ANY name
+uint256 tokenId1 = registry.getTokenId("example");
+uint256 tokenId2 = registry.getTokenId("another");
+
+registry.setResolver(tokenId1, resolver1);  // ✓ Allowed via ROOT_RESOURCE
+registry.setResolver(tokenId2, resolver2);  // ✓ Allowed via ROOT_RESOURCE
+
+// Check permissions
+registry.hasRoles(tokenId1, ROLE_SET_RESOLVER, alice);  // true
+registry.hasRoles(tokenId2, ROLE_SET_RESOLVER, alice);  // true
+registry.hasRootRoles(ROLE_SET_RESOLVER, alice);        // true
+```
+
+### Example 2: Mixed Permissions
+
+```solidity
+// Bob has global renewal permission
+registry.grantRootRoles(
+    RegistryRolesLib.ROLE_RENEW,
+    bob
+);
+
+// Bob also gets specific resolver permission for one name
+uint256 exampleTokenId = registry.getTokenId("example");
+registry.grantRoles(
+    exampleTokenId,
+    RegistryRolesLib.ROLE_SET_RESOLVER,
+    bob
+);
+
+// Bob's effective permissions:
+// For "example": ROLE_RENEW (inherited) + ROLE_SET_RESOLVER (specific)
+// For other names: ROLE_RENEW only (inherited)
+
+registry.renew(exampleTokenId, newExpiry);              // ✓ Allowed
+registry.setResolver(exampleTokenId, resolver);         // ✓ Allowed
+
+uint256 anotherTokenId = registry.getTokenId("another");
+registry.renew(anotherTokenId, newExpiry);              // ✓ Allowed (ROOT)
+registry.setResolver(anotherTokenId, resolver);         // ✗ Denied (no role)
+```
+
+### Example 3: Service Contract
+
+```solidity
+contract RenewalService {
+    IPermissionedRegistry public registry;
+    
+    constructor(IPermissionedRegistry _registry) {
+        registry = _registry;
+    }
+    
+    function renewName(uint256 tokenId, uint64 duration) external {
+        // This contract needs ROLE_RENEW at ROOT_RESOURCE
+        // to renew any name users request
+        uint64 currentExpiry = registry.getExpiry(tokenId);
+        registry.renew(tokenId, currentExpiry + duration);
+    }
+}
+
+// Deploy and authorize service
+RenewalService service = new RenewalService(registry);
+registry.grantRootRoles(
+    RegistryRolesLib.ROLE_RENEW,
+    address(service)
+);
+
+// Service can now renew any name on behalf of users
+service.renewName(tokenId, 365 days);
+```
+
+## Root vs Resource Grants
+
+### When to Use ROOT_RESOURCE
+
+Use `grantRootRoles` for:
+
+<CardGroup cols={2}>
+  <Card title="Trusted Administrators" icon="user-shield">
+    Team members who need full control across all names
+  </Card>
+  
+  <Card title="Service Contracts" icon="robot">
+    Automated systems operating on multiple names
+  </Card>
+  
+  <Card title="Migration Tools" icon="arrows-turn-right">
+    Scripts that update many names at once
+  </Card>
+  
+  <Card title="Emergency Operations" icon="triangle-exclamation">
+    Break-glass accounts for critical situations
+  </Card>
+</CardGroup>
+
+```solidity
+// Global administrator
+registry.grantRootRoles(
+    ROLE_SET_RESOLVER | ROLE_SET_SUBREGISTRY | ROLE_RENEW,
+    admin
+);
+
+// Renewal service
+registry.grantRootRoles(
+    ROLE_RENEW,
+    renewalService
+);
+```
+
+### When to Use Resource-Specific Grants
+
+Use `grantRoles` for:
+
+<CardGroup cols={2}>
+  <Card title="Delegation" icon="hand-holding">
+    Granting permissions for your specific names
+  </Card>
+  
+  <Card title="Limited Operators" icon="user-lock">
+    Dapp operators managing individual names
+  </Card>
+  
+  <Card title="Collaborative Management" icon="users">
+    Team members working on specific projects
+  </Card>
+  
+  <Card title="Temporary Access" icon="clock">
+    Time-limited permissions that can be revoked
+  </Card>
+</CardGroup>
+
+```solidity
+// Delegate resolver management for your name
+registry.grantRoles(
+    myTokenId,
+    ROLE_SET_RESOLVER,
+    dappOperator
+);
+
+// Allow friend to renew your name
+registry.grantRoles(
+    myTokenId,
+    ROLE_RENEW,
+    friend
+);
+```
+
+## Permission Precedence
+
+There is no "precedence" in the traditional sense. Instead:
+
+<Tip>
+**Additive Model**: ROOT_RESOURCE and resource-specific roles are **additive**. Having a role in either place grants the permission.
+</Tip>
+
+You cannot "revoke" a ROOT_RESOURCE role with a resource-specific setting:
+
+```solidity
+// Alice has ROLE_RENEW at ROOT_RESOURCE
+registry.grantRootRoles(ROLE_RENEW, alice);
+
+// Revoking at resource level does NOT remove ROOT permission
+registry.revokeRoles(tokenId, ROLE_RENEW, alice);
+
+// Alice STILL has permission via ROOT_RESOURCE
+registry.hasRoles(tokenId, ROLE_RENEW, alice);  // true
+```
+
+To fully revoke:
+
+```solidity
+// Must revoke at ROOT_RESOURCE level
+registry.revokeRootRoles(ROLE_RENEW, alice);
+
+// Now Alice has no permission
+registry.hasRoles(tokenId, ROLE_RENEW, alice);  // false
+```
+
+## Admin Role Inheritance
+
+Admin roles also inherit from ROOT_RESOURCE:
+
+```solidity
+// Grant admin role at ROOT_RESOURCE (via internal function)
+_grantRoles(
+    ROOT_RESOURCE,
+    ROLE_SET_RESOLVER_ADMIN,
+    superAdmin,
+    false
+);
+
+// superAdmin can now grant ROLE_SET_RESOLVER for ANY resource
+registry.grantRoles(
+    tokenId1,
+    ROLE_SET_RESOLVER,
+    operator1
+);
+
+registry.grantRoles(
+    tokenId2,
+    ROLE_SET_RESOLVER,
+    operator2
+);
+```
+
+<Note>
+In registry contracts, admin roles cannot be granted via `grantRoles`/`grantRootRoles`. They're only assigned during registration or via internal logic.
+</Note>
+
+## Checking Permissions
+
+### hasRoles vs hasRootRoles
+
+```solidity
+// hasRoles: Checks ROOT_RESOURCE OR specific resource
+function hasRoles(
+    uint256 resource,
+    uint256 roleBitmap,
+    address account
+) public view returns (bool);
+
+// hasRootRoles: Checks ONLY ROOT_RESOURCE
+function hasRootRoles(
+    uint256 roleBitmap,
+    address account
+) public view returns (bool);
+```
+
+Example:
+
+```solidity
+// Alice has ROLE_RENEW at ROOT_RESOURCE
+registry.grantRootRoles(ROLE_RENEW, alice);
+
+// Bob has ROLE_RENEW for specific token only
+registry.grantRoles(tokenId, ROLE_RENEW, bob);
+
+// Check methods return different results
+registry.hasRoles(tokenId, ROLE_RENEW, alice);      // true (via ROOT)
+registry.hasRootRoles(ROLE_RENEW, alice);           // true
+
+registry.hasRoles(tokenId, ROLE_RENEW, bob);        // true (specific)
+registry.hasRootRoles(ROLE_RENEW, bob);             // false (not at root)
+
+registry.hasRoles(otherTokenId, ROLE_RENEW, alice); // true (via ROOT)
+registry.hasRoles(otherTokenId, ROLE_RENEW, bob);   // false (only has for tokenId)
+```
+
+## Gas Efficiency
+
+Inheritance is extremely gas-efficient:
+
+### Single Permission Check
+
+```solidity
+// Only 2 SLOAD operations + bitwise ops
+function hasRoles(uint256 resource, uint256 roleBitmap, address account)
+    public view returns (bool)
+{
+    return (
+        (_roles[ROOT_RESOURCE][account] |    // SLOAD 1
+         _roles[resource][account])          // SLOAD 2
+        & roleBitmap
+    ) == roleBitmap;
+}
+```
+
+### Batch Operations
+
+```solidity
+// Grant root role once for 100 names
+registry.grantRootRoles(ROLE_SET_RESOLVER, operator);
+// Cost: ~50k gas
+
+// vs. Grant individually for 100 names
+for (uint i = 0; i < 100; i++) {
+    registry.grantRoles(tokenIds[i], ROLE_SET_RESOLVER, operator);
+}
+// Cost: ~5M gas
+```
+
+<Tip>
+**50x Cheaper**: Granting a root role is approximately 50x more gas-efficient than granting the same role individually for 100 names.
+</Tip>
+
+## Security Considerations
+
+### ROOT_RESOURCE Is Powerful
+
+<Warning>
+**Exercise Caution**: ROOT_RESOURCE grants are extremely powerful. An account with `ROLE_SET_RESOLVER` at the root level can set the resolver for **every name** in the registry, including those it doesn't own.
+</Warning>
+
+Best practices:
+
+1. **Limit root role holders** to only essential accounts
+2. **Use multisig** for root role management
+3. **Monitor events** for root role changes
+4. **Regular audits** of root role holders
+
+### Separation of Concerns
+
+```solidity
+// Good: Separate root roles by function
+registry.grantRootRoles(ROLE_RENEW, renewalService);
+registry.grantRootRoles(ROLE_SET_RESOLVER, migrationTool);
+
+// Avoid: Granting multiple powerful root roles to one address
+registry.grantRootRoles(
+    ROLE_RENEW | ROLE_SET_RESOLVER | ROLE_SET_SUBREGISTRY | ROLE_UNREGISTER,
+    singleAdmin  // Too much power in one address
+);
+```
+
+### Admin Role Restrictions
+
+In registry contracts, admin roles are restricted to prevent security issues:
+
+```solidity PermissionedRegistry.sol:447
+// Admin roles cannot be granted via grantRoles
+function _getSettableRoles(
+    uint256 resource,
+    address account
+) internal view virtual override returns (uint256) {
+    uint256 allRoles = super.roles(resource, account) | super.roles(ROOT_RESOURCE, account);
+    uint256 adminRoleBitmap = allRoles & EACBaseRolesLib.ADMIN_ROLES;
+    return adminRoleBitmap >> 128;  // Only regular roles
+}
+```
+
+This prevents:
+1. Granting admin rights before transfer
+2. Retaining admin control after selling a name
+
+## Monitoring and Auditing
+
+### Tracking Root Role Changes
+
+All role changes emit events with indexed parameters:
+
+```solidity
+event EACRolesChanged(
+    uint256 indexed resource,
+    address indexed account,
+    uint256 oldRoleBitmap,
+    uint256 newRoleBitmap
+);
+
+// Listen for ROOT_RESOURCE changes
+filter = {
+    address: registryAddress,
+    topics: [
+        keccak256("EACRolesChanged(uint256,address,uint256,uint256)"),
+        0x0000000000000000000000000000000000000000000000000000000000000000, // ROOT_RESOURCE
+        null,
+        null
+    ]
+};
+```
+
+### Querying Current State
+
+```solidity
+// Get all root roles for an account
+uint256 rootRoles = registry.roles(ROOT_RESOURCE, account);
+
+// Check specific root role
+bool hasRootRenew = registry.hasRootRoles(
+    RegistryRolesLib.ROLE_RENEW,
+    account
+);
+
+// Get assignee count for root roles
+(uint256 counts, uint256 mask) = registry.getAssigneeCount(
+    ROOT_RESOURCE,
+    RegistryRolesLib.ROLE_SET_RESOLVER
+);
+```
+
+## Advanced Patterns
+
+### Tiered Administration
+
+```solidity
+// Tier 1: Super admin (root level, all permissions)
+registry.grantRootRoles(
+    ROLE_SET_RESOLVER | ROLE_SET_SUBREGISTRY | ROLE_RENEW | ROLE_UNREGISTER,
+    superAdmin
+);
+
+// Tier 2: Renewal service (root level, limited permissions)
+registry.grantRootRoles(
+    ROLE_RENEW,
+    renewalService
+);
+
+// Tier 3: Name operators (token level, per-name permissions)
+registry.grantRoles(
+    tokenId,
+    ROLE_SET_RESOLVER,
+    nameOperator
+);
+```
+
+### Temporary Global Access
+
+```solidity
+// Grant temporary root access for migration
+registry.grantRootRoles(ROLE_SET_RESOLVER, migrationScript);
+
+// Perform migration
+migrationScript.migrateAllResolvers();
+
+// Immediately revoke
+registry.revokeRootRoles(ROLE_SET_RESOLVER, migrationScript);
+```
+
+### Service Contract Pattern
+
+```solidity
+contract NameManagementService {
+    IPermissionedRegistry public immutable registry;
+    
+    constructor(IPermissionedRegistry _registry) {
+        registry = _registry;
+        // Service needs root roles to operate on user names
+    }
+    
+    function updateResolver(
+        uint256 tokenId,
+        address newResolver
+    ) external {
+        address owner = registry.ownerOf(tokenId);
+        require(msg.sender == owner, "Not owner");
+        
+        // Service can set resolver via ROOT_RESOURCE permission
+        registry.setResolver(tokenId, newResolver);
+    }
+}
+
+// Authorize service with root permissions
+registry.grantRootRoles(
+    ROLE_SET_RESOLVER,
+    address(service)
+);
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Enhanced Access Control" href="/access-control/enhanced-access-control" icon="shield-halved">
+    Deep dive into the EAC implementation
+  </Card>
+  
+  <Card title="Registry Roles" href="/access-control/registry-roles" icon="list-check">
+    Learn about specific roles in registries
+  </Card>
+  
+  <Card title="Permissioned Registry" href="/registry/permissioned-registry" icon="book">
+    See how registries implement EAC
+  </Card>
+  
+  <Card title="API Reference" href="/api/access-control/enhanced-access-control" icon="code">
+    Complete API documentation
+  </Card>
+</CardGroup>

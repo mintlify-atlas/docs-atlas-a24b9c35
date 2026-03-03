@@ -1,0 +1,685 @@
+---
+title: 'WrapperRegistry'
+description: 'Upgradeable registry for managing ENS v1 NameWrapper migration to ENS v2'
+---
+
+## Overview
+
+WrapperRegistry is a specialized upgradeable registry that manages the migration of names from ENS v1's NameWrapper to ENS v2. It inherits from PermissionedRegistry and implements the WrapperReceiver pattern to handle incoming ERC1155 transfers from the NameWrapper contract.
+
+When a locked NameWrapper token is transferred to a WrapperRegistry, it automatically:
+1. Validates the name is properly locked
+2. Converts NameWrapper fuses to ENS v2 roles
+3. Creates a new WrapperRegistry for the name's subdomains
+4. Registers the name in the parent registry
+5. Transfers ownership to the specified owner
+
+### Key Features
+
+- Automatic migration from ENS v1 NameWrapper
+- Fuse-to-role conversion
+- Hierarchical subregistry creation
+- ERC1155 receiver for NameWrapper tokens
+- UUPS upgradeable
+- Migration validation and safety checks
+
+## Contract Information
+
+**Inherits**: `IWrapperRegistry`, `PermissionedRegistry`, `WrapperReceiver`, `Initializable`, `UUPSUpgradeable`
+
+**Interface ID**: `0x8cd02f97`
+
+**Deployment**: Via VerifiableFactory as a proxy
+
+## Immutable Values
+
+### V1_RESOLVER
+
+```solidity
+address public immutable V1_RESOLVER
+```
+
+The ENS v1 resolver address. Used as a fallback resolver for migratable children that haven't been migrated yet.
+
+### NAME_WRAPPER
+
+```solidity
+INameWrapper public immutable NAME_WRAPPER
+```
+
+The ENS v1 NameWrapper contract address.
+
+### VERIFIABLE_FACTORY
+
+```solidity
+VerifiableFactory public immutable VERIFIABLE_FACTORY
+```
+
+Factory for deploying new WrapperRegistry instances for migrated subdomains.
+
+### WRAPPER_REGISTRY_IMPL
+
+```solidity
+address public immutable WRAPPER_REGISTRY_IMPL
+```
+
+The WrapperRegistry implementation address used for creating subregistries.
+
+## Storage
+
+### parentNode
+
+```solidity
+bytes32 public parentNode
+```
+
+The namehash of the parent name. Used for:
+- Validating migrated names belong to this registry
+- Checking for migratable children
+- Creating subregistries with correct parent
+
+## Constructor
+
+```solidity
+constructor(
+    INameWrapper nameWrapper,
+    VerifiableFactory verifiableFactory,
+    address ensV1Resolver,
+    IHCAFactoryBasic hcaFactory,
+    IRegistryMetadata metadataProvider
+)
+```
+
+<ParamField path="nameWrapper" type="INameWrapper">
+  The ENS v1 NameWrapper contract
+</ParamField>
+
+<ParamField path="verifiableFactory" type="VerifiableFactory">
+  Factory for deploying subregistry proxies
+</ParamField>
+
+<ParamField path="ensV1Resolver" type="address">
+  The ENS v1 public resolver address
+</ParamField>
+
+<ParamField path="hcaFactory" type="IHCAFactoryBasic">
+  HCA factory for equivalence checking
+</ParamField>
+
+<ParamField path="metadataProvider" type="IRegistryMetadata">
+  Metadata provider for token URIs
+</ParamField>
+
+**Note**: The constructor disables initializers for the implementation contract.
+
+## Initialization
+
+### initialize
+
+Initializes the WrapperRegistry proxy.
+
+```solidity
+function initialize(IWrapperRegistry.ConstructorArgs calldata args) public initializer
+```
+
+<ParamField path="args" type="ConstructorArgs">
+  Initialization arguments:
+  
+  ```solidity
+  struct ConstructorArgs {
+      bytes32 node;      // Parent namehash
+      address owner;     // Registry owner
+      uint256 ownerRoles; // Roles for owner
+  }
+  ```
+</ParamField>
+
+**Fields**:
+
+<ParamField path="args.node" type="bytes32">
+  The namehash of the parent name (e.g., namehash("alice.eth") for alice.eth's subdomains)
+</ParamField>
+
+<ParamField path="args.owner" type="address">
+  The address that will own and control this registry. Cannot be address(0).
+</ParamField>
+
+<ParamField path="args.ownerRoles" type="uint256">
+  Additional roles to grant to the owner beyond `ROLE_UPGRADE` and `ROLE_UPGRADE_ADMIN` which are always granted.
+</ParamField>
+
+**Requirements**:
+- Can only be called once
+- Owner must not be address(0)
+
+**Example**:
+```solidity
+address proxy = verifiableFactory.deployProxy(
+    wrapperRegistryImpl,
+    salt,
+    abi.encodeCall(
+        WrapperRegistry.initialize,
+        (
+            IWrapperRegistry.ConstructorArgs({
+                node: namehash("alice.eth"),
+                owner: aliceAddress,
+                ownerRoles: RegistryRolesLib.ROLE_REGISTRAR | 
+                           RegistryRolesLib.ROLE_REGISTRAR_ADMIN
+            })
+        )
+    )
+);
+```
+
+## Migration Functions
+
+### onERC1155Received
+
+Receives a single NameWrapper token and migrates it.
+
+```solidity
+function onERC1155Received(
+    address operator,
+    address from,
+    uint256 id,
+    uint256 amount,
+    bytes calldata data
+) external returns (bytes4)
+```
+
+<ParamField path="operator" type="address">
+  The address that initiated the transfer
+</ParamField>
+
+<ParamField path="from" type="address">
+  The previous owner of the token
+</ParamField>
+
+<ParamField path="id" type="uint256">
+  The NameWrapper token ID (namehash)
+</ParamField>
+
+<ParamField path="amount" type="uint256">
+  Always 1 for NameWrapper tokens
+</ParamField>
+
+<ParamField path="data" type="bytes">
+  ABI-encoded `IWrapperRegistry.Data` struct:
+  
+  ```solidity
+  struct Data {
+      string label;    // Name label
+      address owner;   // New owner in v2
+      address resolver; // Resolver (or address(0) to use v1)
+      uint256 salt;    // Salt for subregistry deployment
+  }
+  ```
+</ParamField>
+
+**Requirements**:
+- Caller must be the NameWrapper contract
+- Data must be valid and correctly encoded
+- Name must be properly locked (CANNOT_UNWRAP set)
+- Label must match the token ID
+- Owner must not be address(0)
+
+**Returns**: `this.onERC1155Received.selector` on success
+
+**Example**:
+```solidity
+// Transfer from NameWrapper to WrapperRegistry
+nameWrapper.safeTransferFrom(
+    ownerAddress,
+    address(wrapperRegistry),
+    namehash("sub.alice.eth"),
+    1,
+    abi.encode(IWrapperRegistry.Data({
+        label: "sub",
+        owner: newOwnerAddress,
+        resolver: address(0), // Use v1 resolver
+        salt: keccak256("my-salt")
+    }))
+);
+```
+
+### onERC1155BatchReceived
+
+Receives multiple NameWrapper tokens and migrates them in batch.
+
+```solidity
+function onERC1155BatchReceived(
+    address operator,
+    address from,
+    uint256[] calldata ids,
+    uint256[] calldata amounts,
+    bytes calldata data
+) external returns (bytes4)
+```
+
+<ParamField path="operator" type="address">
+  The address that initiated the transfer
+</ParamField>
+
+<ParamField path="from" type="address">
+  The previous owner of the tokens
+</ParamField>
+
+<ParamField path="ids" type="uint256[]">
+  Array of NameWrapper token IDs (namehashes)
+</ParamField>
+
+<ParamField path="amounts" type="uint256[]">
+  Array of amounts (all 1 for NameWrapper)
+</ParamField>
+
+<ParamField path="data" type="bytes">
+  ABI-encoded array of `IWrapperRegistry.Data` structs
+</ParamField>
+
+**Requirements**:
+- Same as `onERC1155Received` but for each token
+- Arrays must have matching lengths
+
+**Returns**: `this.onERC1155BatchReceived.selector` on success
+
+**Example**:
+```solidity
+IWrapperRegistry.Data[] memory migrationData = new IWrapperRegistry.Data[](2);
+migrationData[0] = IWrapperRegistry.Data({
+    label: "sub1",
+    owner: owner1,
+    resolver: resolver1,
+    salt: salt1
+});
+migrationData[1] = IWrapperRegistry.Data({
+    label: "sub2",
+    owner: owner2,
+    resolver: resolver2,
+    salt: salt2
+});
+
+uint256[] memory ids = new uint256[](2);
+ids[0] = uint256(namehash("sub1.alice.eth"));
+ids[1] = uint256(namehash("sub2.alice.eth"));
+
+uint256[] memory amounts = new uint256[](2);
+amounts[0] = 1;
+amounts[1] = 1;
+
+nameWrapper.safeBatchTransferFrom(
+    ownerAddress,
+    address(wrapperRegistry),
+    ids,
+    amounts,
+    abi.encode(migrationData)
+);
+```
+
+### finishERC1155Migration
+
+Internal function that completes the migration process (called by receiver functions).
+
+```solidity
+function finishERC1155Migration(
+    uint256[] calldata ids,
+    IWrapperRegistry.Data[] calldata mds
+) external
+```
+
+**Requirements**:
+- Can only be called by the contract itself (via receiver functions)
+
+**Process for each name**:
+1. Validate label matches namehash
+2. Check name is locked (CANNOT_UNWRAP)
+3. Convert fuses to role bitmaps
+4. Deploy subregistry via VerifiableFactory
+5. Register name with roles and subregistry
+6. Burn migration fuses if not frozen
+
+## Modified Registry Functions
+
+### register
+
+Overrides PermissionedRegistry to prevent registration of migratable children.
+
+```solidity
+function register(
+    string memory label,
+    address owner,
+    IRegistry registry,
+    address resolver,
+    uint256 roleBitmap,
+    uint64 expiry
+) public override returns (uint256 tokenId)
+```
+
+**Additional Requirement**:
+- Name must not be a migratable child (locked in NameWrapper but not yet migrated)
+
+**Reverts**: `MigrationErrors.NameRequiresMigration()` if the name should be migrated via NameWrapper transfer
+
+**Example**:
+```solidity
+// This will revert if "sub" is locked in NameWrapper
+wrapperRegistry.register(
+    "sub",
+    owner,
+    subregistry,
+    resolver,
+    roles,
+    expiry
+); // Reverts: NameRequiresMigration
+
+// Instead, transfer from NameWrapper:
+nameWrapper.safeTransferFrom(...); // Correct approach
+```
+
+### getResolver
+
+Overrides PermissionedRegistry to return v1 resolver for migratable children.
+
+```solidity
+function getResolver(
+    string calldata label
+) public view override returns (address)
+```
+
+**Returns**:
+- `V1_RESOLVER` if the name is a migratable child
+- Normal resolver otherwise (from parent implementation)
+
+**Example**:
+```solidity
+// If "sub" is locked in NameWrapper but not migrated:
+address resolver = wrapperRegistry.getResolver("sub");
+// Returns V1_RESOLVER
+
+// After migration:
+resolver = wrapperRegistry.getResolver("sub");
+// Returns the resolver set during migration
+```
+
+## Query Functions
+
+### parentName
+
+Returns the DNS-encoded name of the parent.
+
+```solidity
+function parentName() external view returns (bytes memory)
+```
+
+<ResponseField name="name" type="bytes">
+  DNS-encoded parent name (e.g., "\x05alice\x03eth\x00" for alice.eth)
+</ResponseField>
+
+**Example**:
+```solidity
+bytes memory name = wrapperRegistry.parentName();
+// For alice.eth registry: [0x05, 'a','l','i','c','e', 0x03, 'e','t','h', 0x00]
+```
+
+## Fuse to Role Conversion
+
+The contract converts NameWrapper fuses to ENS v2 roles:
+
+### Fuses Checked
+
+<ParamField path="CANNOT_UNWRAP" type="uint32">
+  **Required**: Must be set for migration. Ensures name is locked.
+</ParamField>
+
+<ParamField path="CANNOT_BURN_FUSES" type="uint32">
+  **Frozen**: If set, admin roles are not granted (permissions are frozen).
+</ParamField>
+
+<ParamField path="CAN_EXTEND_EXPIRY" type="uint32">
+  **Maps to**: `ROLE_RENEW` (and `ROLE_RENEW_ADMIN` if not frozen)
+</ParamField>
+
+<ParamField path="CANNOT_TRANSFER" type="uint32">
+  **Maps to**: If not set, grants `ROLE_CAN_TRANSFER_ADMIN`
+</ParamField>
+
+<ParamField path="CANNOT_SET_RESOLVER" type="uint32">
+  **Maps to**: If not set, grants `ROLE_SET_RESOLVER` (and admin if not frozen)
+</ParamField>
+
+<ParamField path="CANNOT_CREATE_SUBDOMAIN" type="uint32">
+  **Maps to**: If not set, grants `ROLE_REGISTRAR` on subregistry (and admin if not frozen)
+</ParamField>
+
+### Role Bitmaps Generated
+
+The migration generates two role bitmaps:
+
+**Token Roles** (granted on parent registry token):
+```solidity
+uint256 tokenRoles = 0;
+if (CAN_EXTEND_EXPIRY) {
+    tokenRoles |= ROLE_RENEW;
+    if (!CANNOT_BURN_FUSES) tokenRoles |= ROLE_RENEW_ADMIN;
+}
+if (!CANNOT_SET_RESOLVER) {
+    tokenRoles |= ROLE_SET_RESOLVER;
+    if (!CANNOT_BURN_FUSES) tokenRoles |= ROLE_SET_RESOLVER_ADMIN;
+}
+if (!CANNOT_TRANSFER) {
+    tokenRoles |= ROLE_CAN_TRANSFER_ADMIN;
+}
+```
+
+**Subregistry Roles** (granted on new subregistry root):
+```solidity
+uint256 registryRoles = ROLE_RENEW | ROLE_RENEW_ADMIN; // Always granted
+if (!CANNOT_CREATE_SUBDOMAIN) {
+    registryRoles |= ROLE_REGISTRAR;
+    if (!CANNOT_BURN_FUSES) registryRoles |= ROLE_REGISTRAR_ADMIN;
+}
+```
+
+### Example Conversion
+
+```solidity
+// NameWrapper fuses:
+uint32 fuses = 
+    CANNOT_UNWRAP |           // Required
+    CANNOT_BURN_FUSES |       // Frozen
+    CAN_EXTEND_EXPIRY;        // Can renew
+    // CANNOT_TRANSFER not set    → Can transfer
+    // CANNOT_SET_RESOLVER not set → Can set resolver
+    // CANNOT_CREATE_SUBDOMAIN not set → Can create subdomains
+
+// Converts to:
+// Token roles:
+//   - ROLE_RENEW (no admin - frozen)
+//   - ROLE_SET_RESOLVER (no admin - frozen)
+//   - ROLE_CAN_TRANSFER_ADMIN
+// Subregistry roles:
+//   - ROLE_RENEW | ROLE_RENEW_ADMIN
+//   - ROLE_REGISTRAR (no admin - frozen)
+```
+
+## Migration Process
+
+Complete migration flow:
+
+```solidity
+// 1. User has locked name in NameWrapper
+// namehash("sub.alice.eth") with CANNOT_UNWRAP set
+
+// 2. Prepare migration data
+IWrapperRegistry.Data memory data = IWrapperRegistry.Data({
+    label: "sub",
+    owner: newOwnerAddress,
+    resolver: newResolverAddress, // or address(0) for v1 resolver
+    salt: keccak256("unique-salt")
+});
+
+// 3. Transfer to WrapperRegistry
+nameWrapper.safeTransferFrom(
+    currentOwner,
+    address(aliceEthWrapperRegistry),
+    uint256(namehash("sub.alice.eth")),
+    1,
+    abi.encode(data)
+);
+
+// 4. WrapperRegistry automatically:
+//    a. Validates the name
+//    b. Converts fuses to roles
+//    c. Deploys WrapperRegistry for sub.alice.eth
+//    d. Registers "sub" in alice.eth registry
+//    e. Grants ownership and roles
+//    f. Burns migration fuses (if not frozen)
+
+// 5. Result:
+//    - "sub.alice.eth" is now in ENS v2
+//    - newOwnerAddress owns the name
+//    - New subregistry for *.sub.alice.eth
+//    - Roles match original fuse permissions
+```
+
+## Upgrade Functions
+
+### upgradeToAndCall
+
+Upgrades the registry implementation (inherited from UUPSUpgradeable).
+
+```solidity
+function upgradeToAndCall(address newImplementation, bytes memory data) external payable
+```
+
+**Authorization**: Requires `ROLE_UPGRADE` on root resource.
+
+See [UserRegistry](/api/registry/user-registry#upgrade-functions) for details.
+
+## Events
+
+Inherits all events from PermissionedRegistry. Additional migration-related events come from subregistry deployment.
+
+## Errors
+
+### InvalidData
+
+```solidity
+error InvalidData()
+```
+
+Thrown when migration data is invalid or incorrectly encoded.
+
+### NameDataMismatch
+
+```solidity
+error NameDataMismatch(uint256 node)
+```
+
+Thrown when the label doesn't match the token ID namehash.
+
+### NameNotLocked
+
+```solidity
+error NameNotLocked(uint256 node)
+```
+
+Thrown when attempting to migrate a name without CANNOT_UNWRAP fuse.
+
+### NameRequiresMigration
+
+```solidity
+error NameRequiresMigration()
+```
+
+Thrown when attempting to register a name that should be migrated via NameWrapper transfer.
+
+### UnauthorizedCaller
+
+```solidity
+error UnauthorizedCaller(address caller)
+```
+
+Thrown when a protected function is called by an unauthorized address.
+
+## Security Considerations
+
+### Migration Safety
+
+1. **Lock Verification**: Names must have CANNOT_UNWRAP set
+2. **Label Validation**: Label must match the namehash
+3. **Owner Validation**: New owner cannot be address(0)
+4. **Parent Match**: Name must be a child of this registry's parent
+5. **Fuse Burning**: Migration fuses burned to prevent re-migration
+
+### Access Control
+
+- Only NameWrapper can call receiver functions
+- Only ROLE_UPGRADE can upgrade the contract
+- Migratable children block normal registration
+
+### Subregistry Creation
+
+- Deterministic addresses via VerifiableFactory
+- One subregistry per name (enforced by deployment salt)
+- Subregistries inherit proper permissions
+
+## Example: Complete Migration
+
+```solidity
+// Setup: alice.eth is migrated to v2 with WrapperRegistry
+// Alice has sub.alice.eth locked in NameWrapper with:
+//   - CANNOT_UNWRAP | CANNOT_BURN_FUSES | CAN_EXTEND_EXPIRY
+//   - Can transfer, set resolver, create subdomains
+
+IWrapperRegistry aliceRegistry = IWrapperRegistry(
+    ethRegistry.getSubregistry("alice")
+);
+
+// Prepare migration
+IWrapperRegistry.Data memory migrationData = IWrapperRegistry.Data({
+    label: "sub",
+    owner: aliceAddress,
+    resolver: customResolverAddress,
+    salt: keccak256(abi.encode("sub.alice.eth", block.timestamp))
+});
+
+// Migrate by transferring from NameWrapper
+nameWrapper.safeTransferFrom(
+    aliceAddress,
+    address(aliceRegistry),
+    uint256(namehash("sub.alice.eth")),
+    1,
+    abi.encode(migrationData)
+);
+
+// After migration:
+// 1. sub.alice.eth is registered in alice.eth registry
+IRegistry subRegistry = aliceRegistry.getSubregistry("sub");
+assert(address(subRegistry) != address(0));
+
+// 2. Alice owns the name
+uint256 tokenId = aliceRegistry.getTokenId(keccak256("sub"));
+assert(aliceRegistry.ownerOf(tokenId) == aliceAddress);
+
+// 3. Roles match fuses
+assert(aliceRegistry.hasRoles(
+    tokenId,
+    RegistryRolesLib.ROLE_RENEW | 
+    RegistryRolesLib.ROLE_SET_RESOLVER |
+    RegistryRolesLib.ROLE_CAN_TRANSFER_ADMIN,
+    aliceAddress
+));
+
+// 4. Subregistry is ready for subdomains
+IWrapperRegistry subWrapperRegistry = IWrapperRegistry(address(subRegistry));
+// Alice can now register subsub.sub.alice.eth
+```
+
+## Notes
+
+- WrapperRegistry is specifically for migration from ENS v1 NameWrapper
+- Each migrated name gets its own WrapperRegistry for subdomains
+- Fuse permissions are preserved through role conversion
+- Migration is one-way (v1 → v2)
+- Migratable children must be migrated via NameWrapper transfer
+- Resolver fallback ensures v1 resolution works until migration

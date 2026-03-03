@@ -1,0 +1,641 @@
+---
+title: 'IPermissionedRegistry'
+description: 'Role-based permissioned registry interface for ENS v2'
+icon: 'shield-halved'
+---
+
+## Overview
+
+The `IPermissionedRegistry` interface extends the ENS v2 registry with role-based access control through the Enhanced Access Control (EAC) system. It combines standard registry functionality with fine-grained permission management, allowing for complex permission schemes across domain resources.
+
+**Interface Selector:** `0xafff3a63`
+
+## Inheritance
+
+```solidity
+interface IPermissionedRegistry is IStandardRegistry, IEnhancedAccessControl
+```
+
+- Inherits from `IStandardRegistry` for core registry operations
+- Inherits from `IEnhancedAccessControl` for role-based access control
+- Transitively inherits from `IRegistry` and `IERC1155Singleton`
+
+## Types
+
+### Status
+
+The registration status of a subdomain.
+
+```solidity
+enum Status {
+    AVAILABLE,
+    RESERVED,
+    REGISTERED
+}
+```
+
+<ResponseField name="AVAILABLE" type="uint8">
+  The subdomain is available for registration (value: 0).
+</ResponseField>
+
+<ResponseField name="RESERVED" type="uint8">
+  The subdomain is reserved but not yet registered (value: 1).
+</ResponseField>
+
+<ResponseField name="REGISTERED" type="uint8">
+  The subdomain is actively registered with an owner (value: 2).
+</ResponseField>
+
+**Example:**
+
+```solidity
+IPermissionedRegistry.Status status = registry.getStatus(labelHash);
+
+if (status == IPermissionedRegistry.Status.AVAILABLE) {
+    // Can register this name
+} else if (status == IPermissionedRegistry.Status.RESERVED) {
+    // Name is reserved, cannot register
+} else {
+    // Name is already registered
+}
+```
+
+### State
+
+The complete registration state of a subdomain.
+
+```solidity
+struct State {
+    Status status;        // getStatus()
+    uint64 expiry;        // getExpiry()
+    address latestOwner;  // latestOwnerOf()
+    uint256 tokenId;      // getTokenId()
+    uint256 resource;     // getResource()
+}
+```
+
+<ResponseField name="status" type="Status" required>
+  Current registration status (AVAILABLE, RESERVED, or REGISTERED).
+</ResponseField>
+
+<ResponseField name="expiry" type="uint64" required>
+  Expiration timestamp for the name. Zero if AVAILABLE.
+</ResponseField>
+
+<ResponseField name="latestOwner" type="address" required>
+  The most recent owner address. Zero address if never registered.
+</ResponseField>
+
+<ResponseField name="tokenId" type="uint256" required>
+  The current token ID for this name.
+</ResponseField>
+
+<ResponseField name="resource" type="uint256" required>
+  The EAC resource ID associated with this name.
+</ResponseField>
+
+**Example:**
+
+```solidity
+// Get complete state for a name
+IPermissionedRegistry.State memory state = registry.getState(labelHash);
+
+console.log("Status:", uint8(state.status));
+console.log("Token ID:", state.tokenId);
+console.log("Resource:", state.resource);
+console.log("Owner:", state.latestOwner);
+console.log("Expires:", state.expiry);
+
+if (state.status == IPermissionedRegistry.Status.REGISTERED) {
+    // Can check roles on the resource
+    bool hasManager = registry.hasRoles(
+        state.resource,
+        MANAGER_ROLE,
+        msg.sender
+    );
+}
+```
+
+## Events
+
+### TokenResource
+
+Emitted when a token is associated with an EAC resource.
+
+```solidity
+event TokenResource(uint256 indexed tokenId, uint256 indexed resource);
+```
+
+<ResponseField name="tokenId" type="uint256" required>
+  The token ID being associated.
+</ResponseField>
+
+<ResponseField name="resource" type="uint256" required>
+  The EAC resource ID.
+</ResponseField>
+
+<Info>
+  This event is emitted during registration or when token regeneration occurs. The resource ID is used for role-based access control.
+</Info>
+
+**Example:**
+
+```solidity
+// Registration triggers TokenResource event
+uint256 tokenId = registry.register(
+    "alice",
+    msg.sender,
+    IRegistry(address(0)),
+    resolverAddress,
+    0, // no initial roles
+    uint64(block.timestamp + 365 days)
+);
+// Emits: TokenResource(tokenId, resource)
+
+// Now can grant roles to the resource
+registry.grantRoles(resource, MANAGER_ROLE, managerAddress);
+```
+
+## Errors
+
+### NameAlreadyReserved
+
+Thrown when attempting to register or reserve a name that is already reserved.
+
+```solidity
+error NameAlreadyReserved(string label);
+```
+
+**Error Selector:** `0xee7f75f7`
+
+<ResponseField name="label" type="string" required>
+  The label that is already reserved.
+</ResponseField>
+
+**Example:**
+
+```solidity
+try registry.reserve("premium", uint64(block.timestamp + 365 days)) {
+    // Success
+} catch (bytes memory reason) {
+    bytes4 selector = bytes4(reason);
+    if (selector == IPermissionedRegistry.NameAlreadyReserved.selector) {
+        // Name is already reserved
+        console.log("Cannot reserve: name already reserved");
+    }
+}
+```
+
+## Functions
+
+### latestOwnerOf
+
+Get the latest owner of a token, even if it has been burned.
+
+```solidity
+function latestOwnerOf(uint256 tokenId) external view returns (address);
+```
+
+<ParamField path="query.tokenId" type="uint256" required>
+  The token ID to query.
+</ParamField>
+
+<ResponseField name="return" type="address">
+  The latest owner address. Returns zero address if never owned.
+</ResponseField>
+
+<Info>
+  Unlike standard ERC1155 `ownerOf`, this function returns the last known owner even if the token has been burned or transferred. Useful for historical ownership tracking.
+</Info>
+
+**Example:**
+
+```solidity
+// Get latest owner, even after burn
+address latestOwner = registry.latestOwnerOf(tokenId);
+address currentOwner = registry.ownerOf(tokenId); // May revert if burned
+
+if (latestOwner != address(0) && currentOwner == address(0)) {
+    console.log("Token was previously owned by", latestOwner, "but is now burned");
+}
+```
+
+### getState
+
+Get the complete state of a subdomain.
+
+```solidity
+function getState(uint256 anyId) external view returns (State memory);
+```
+
+<ParamField path="query.anyId" type="uint256" required>
+  The labelhash, token ID, or resource ID to query.
+</ParamField>
+
+<ResponseField name="return" type="State">
+  The complete state struct containing status, expiry, owner, token ID, and resource.
+</ResponseField>
+
+<Tip>
+  The `anyId` parameter accepts three different identifiers: labelhash (keccak256 of label), token ID, or EAC resource ID. The function automatically resolves which type is provided.
+</Tip>
+
+**Example:**
+
+```solidity
+// Query by labelhash
+bytes32 labelHash = keccak256("alice");
+IPermissionedRegistry.State memory state = registry.getState(uint256(labelHash));
+
+// Or query by token ID
+state = registry.getState(tokenId);
+
+// Or query by resource
+state = registry.getState(resource);
+
+// All return the same state
+require(state.status == IPermissionedRegistry.Status.REGISTERED, "Not registered");
+```
+
+### getStatus
+
+Get the registration status of a subdomain.
+
+```solidity
+function getStatus(uint256 anyId) external view returns (Status);
+```
+
+<ParamField path="query.anyId" type="uint256" required>
+  The labelhash, token ID, or resource ID.
+</ParamField>
+
+<ResponseField name="return" type="Status">
+  The status enum value (AVAILABLE, RESERVED, or REGISTERED).
+</ResponseField>
+
+**Example:**
+
+```solidity
+function checkAvailability(string calldata label) public view returns (bool) {
+    bytes32 labelHash = keccak256(bytes(label));
+    IPermissionedRegistry.Status status = registry.getStatus(uint256(labelHash));
+    return status == IPermissionedRegistry.Status.AVAILABLE;
+}
+
+// Usage
+if (checkAvailability("alice")) {
+    // Can register "alice"
+    registry.register("alice", msg.sender, ...);
+}
+```
+
+### getResource
+
+Get the EAC resource ID from any identifier.
+
+```solidity
+function getResource(uint256 anyId) external view returns (uint256);
+```
+
+<ParamField path="query.anyId" type="uint256" required>
+  The labelhash, token ID, or resource ID.
+</ParamField>
+
+<ResponseField name="return" type="uint256">
+  The EAC resource ID associated with the name.
+</ResponseField>
+
+**Example:**
+
+```solidity
+// Get resource from labelhash
+bytes32 labelHash = keccak256("alice");
+uint256 resource = registry.getResource(uint256(labelHash));
+
+// Check if address has manager role
+bool isManager = registry.hasRoles(resource, MANAGER_ROLE, msg.sender);
+
+if (isManager) {
+    // Can perform management operations
+    registry.setResolver(resource, newResolverAddress);
+}
+```
+
+### getTokenId
+
+Get the token ID from any identifier.
+
+```solidity
+function getTokenId(uint256 anyId) external view returns (uint256);
+```
+
+<ParamField path="query.anyId" type="uint256" required>
+  The labelhash, token ID, or resource ID.
+</ParamField>
+
+<ResponseField name="return" type="uint256">
+  The current token ID for the name.
+</ResponseField>
+
+<Warning>
+  Token IDs can change when roles are modified due to token regeneration. Always query the current token ID rather than caching it.
+</Warning>
+
+**Example:**
+
+```solidity
+// Get current token ID
+bytes32 labelHash = keccak256("alice");
+uint256 tokenId = registry.getTokenId(uint256(labelHash));
+
+// Check ownership
+address owner = registry.ownerOf(tokenId);
+
+// After role changes, token ID may be different
+registry.grantRoles(resource, MANAGER_ROLE, newManager);
+uint256 newTokenId = registry.getTokenId(uint256(labelHash));
+// newTokenId != tokenId if regeneration occurred
+```
+
+## Usage Examples
+
+### Register name with roles
+
+```solidity
+import {IPermissionedRegistry} from "./interfaces/IPermissionedRegistry.sol";
+import {MANAGER_ROLE, EDITOR_ROLE} from "./libraries/RegistryRolesLib.sol";
+
+contract NameRegistrar {
+    IPermissionedRegistry public registry;
+
+    constructor(address _registry) {
+        registry = IPermissionedRegistry(_registry);
+    }
+
+    function registerWithManager(
+        string calldata label,
+        address owner,
+        address manager,
+        address resolver,
+        uint64 duration
+    ) external returns (uint256 tokenId) {
+        // Check availability
+        bytes32 labelHash = keccak256(bytes(label));
+        require(
+            registry.getStatus(uint256(labelHash)) == IPermissionedRegistry.Status.AVAILABLE,
+            "Name not available"
+        );
+
+        // Register name
+        uint64 expiry = uint64(block.timestamp + duration);
+        tokenId = registry.register(
+            label,
+            owner,
+            IRegistry(address(0)),
+            resolver,
+            0, // no initial roles in registration
+            expiry
+        );
+
+        // Grant manager role
+        uint256 resource = registry.getResource(tokenId);
+        registry.grantRoles(resource, MANAGER_ROLE, manager);
+
+        return tokenId;
+    }
+}
+```
+
+### Check permissions and modify
+
+```solidity
+import {IPermissionedRegistry} from "./interfaces/IPermissionedRegistry.sol";
+import {MANAGER_ROLE} from "./libraries/RegistryRolesLib.sol";
+
+contract DomainManager {
+    IPermissionedRegistry public registry;
+
+    constructor(address _registry) {
+        registry = IPermissionedRegistry(_registry);
+    }
+
+    function updateResolver(
+        string calldata label,
+        address newResolver
+    ) external {
+        // Get resource from label
+        bytes32 labelHash = keccak256(bytes(label));
+        uint256 resource = registry.getResource(uint256(labelHash));
+
+        // Check permissions
+        require(
+            registry.hasRoles(resource, MANAGER_ROLE, msg.sender),
+            "Not authorized: missing manager role"
+        );
+
+        // Update resolver
+        registry.setResolver(resource, newResolver);
+    }
+
+    function checkPermissions(string calldata label, address account)
+        external
+        view
+        returns (
+            bool isOwner,
+            bool isManager,
+            uint256 roleBitmap
+        )
+    {
+        // Get state
+        bytes32 labelHash = keccak256(bytes(label));
+        IPermissionedRegistry.State memory state = registry.getState(uint256(labelHash));
+
+        // Check ownership
+        isOwner = (state.latestOwner == account);
+
+        // Check manager role
+        isManager = registry.hasRoles(state.resource, MANAGER_ROLE, account);
+
+        // Get all roles
+        roleBitmap = registry.roles(state.resource, account);
+
+        return (isOwner, isManager, roleBitmap);
+    }
+}
+```
+
+### Batch status check
+
+```solidity
+import {IPermissionedRegistry} from "./interfaces/IPermissionedRegistry.sol";
+
+contract NameChecker {
+    IPermissionedRegistry public registry;
+
+    struct NameInfo {
+        string label;
+        IPermissionedRegistry.Status status;
+        address owner;
+        uint64 expiry;
+    }
+
+    constructor(address _registry) {
+        registry = IPermissionedRegistry(_registry);
+    }
+
+    function checkNames(string[] calldata labels)
+        external
+        view
+        returns (NameInfo[] memory results)
+    {
+        results = new NameInfo[](labels.length);
+
+        for (uint256 i = 0; i < labels.length; i++) {
+            bytes32 labelHash = keccak256(bytes(labels[i]));
+            IPermissionedRegistry.State memory state = registry.getState(
+                uint256(labelHash)
+            );
+
+            results[i] = NameInfo({
+                label: labels[i],
+                status: state.status,
+                owner: state.latestOwner,
+                expiry: state.expiry
+            });
+        }
+
+        return results;
+    }
+
+    function getAvailableNames(string[] calldata labels)
+        external
+        view
+        returns (string[] memory available)
+    {
+        uint256 availableCount = 0;
+
+        // Count available names
+        for (uint256 i = 0; i < labels.length; i++) {
+            bytes32 labelHash = keccak256(bytes(labels[i]));
+            if (
+                registry.getStatus(uint256(labelHash)) ==
+                IPermissionedRegistry.Status.AVAILABLE
+            ) {
+                availableCount++;
+            }
+        }
+
+        // Build result array
+        available = new string[](availableCount);
+        uint256 index = 0;
+        for (uint256 i = 0; i < labels.length; i++) {
+            bytes32 labelHash = keccak256(bytes(labels[i]));
+            if (
+                registry.getStatus(uint256(labelHash)) ==
+                IPermissionedRegistry.Status.AVAILABLE
+            ) {
+                available[index++] = labels[i];
+            }
+        }
+
+        return available;
+    }
+}
+```
+
+### Role-based delegation
+
+```solidity
+import {IPermissionedRegistry} from "./interfaces/IPermissionedRegistry.sol";
+import {MANAGER_ROLE, EDITOR_ROLE, TRANSFER_ADMIN_ROLE} from "./libraries/RegistryRolesLib.sol";
+
+contract RoleDelegation {
+    IPermissionedRegistry public registry;
+
+    event RoleDelegated(uint256 indexed resource, address indexed account, uint256 roles);
+
+    constructor(address _registry) {
+        registry = IPermissionedRegistry(_registry);
+    }
+
+    // Delegate multiple roles to an operator
+    function delegateRoles(
+        string calldata label,
+        address operator,
+        bool grantManager,
+        bool grantEditor
+    ) external {
+        uint256 resource = registry.getResource(
+            uint256(keccak256(bytes(label)))
+        );
+
+        // Build role bitmap
+        uint256 roleBitmap = 0;
+        if (grantManager) roleBitmap |= MANAGER_ROLE;
+        if (grantEditor) roleBitmap |= EDITOR_ROLE;
+
+        require(roleBitmap != 0, "No roles specified");
+
+        // Grant roles (requires appropriate permissions)
+        registry.grantRoles(resource, roleBitmap, operator);
+
+        emit RoleDelegated(resource, operator, roleBitmap);
+    }
+
+    // Revoke all roles from an operator
+    function revokeAllRoles(
+        string calldata label,
+        address operator
+    ) external {
+        uint256 resource = registry.getResource(
+            uint256(keccak256(bytes(label)))
+        );
+
+        // Get current roles
+        uint256 currentRoles = registry.roles(resource, operator);
+
+        if (currentRoles != 0) {
+            // Revoke all current roles
+            registry.revokeRoles(resource, currentRoles, operator);
+        }
+    }
+
+    // Check what roles an account has
+    function getRoleInfo(string calldata label, address account)
+        external
+        view
+        returns (
+            uint256 roleBitmap,
+            bool hasManager,
+            bool hasEditor,
+            bool hasTransferAdmin
+        )
+    {
+        uint256 resource = registry.getResource(
+            uint256(keccak256(bytes(label)))
+        );
+
+        roleBitmap = registry.roles(resource, account);
+        hasManager = registry.hasRoles(resource, MANAGER_ROLE, account);
+        hasEditor = registry.hasRoles(resource, EDITOR_ROLE, account);
+        hasTransferAdmin = registry.hasRoles(resource, TRANSFER_ADMIN_ROLE, account);
+
+        return (roleBitmap, hasManager, hasEditor, hasTransferAdmin);
+    }
+}
+```
+
+## Related Interfaces
+
+<Columns cols={2}>
+  <Card title="IEnhancedAccessControl" icon="key" href="/api/interfaces/ienhanced-access-control">
+    Role-based access control system.
+  </Card>
+  <Card title="IRegistry" icon="database" href="/api/interfaces/iregistry">
+    Base registry interface.
+  </Card>
+</Columns>
+
+<Note>
+  The `IPermissionedRegistry` combines registry operations with fine-grained access control. Use the `anyId` pattern to query by labelhash, token ID, or resource ID interchangeably.
+</Note>

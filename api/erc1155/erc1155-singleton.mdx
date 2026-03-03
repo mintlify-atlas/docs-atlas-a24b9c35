@@ -1,0 +1,995 @@
+---
+title: "ERC1155Singleton"
+description: "A specialized ERC1155 implementation that enforces a single token per ID with ownership tracking"
+---
+
+## Overview
+
+`ERC1155Singleton` is an abstract contract that implements a unique variation of the ERC1155 multi-token standard. Unlike standard ERC1155 contracts that support multiple copies of each token ID, this implementation enforces that only **one token exists per ID**, making it behave similarly to ERC721 while maintaining ERC1155 compatibility.
+
+### Key Differences from Standard ERC1155
+
+<CardGroup cols={2}>
+  <Card title="Singleton Pattern" icon="fingerprint">
+    Each token ID can only have a maximum balance of 1, ensuring uniqueness.
+  </Card>
+  <Card title="Owner Tracking" icon="user">
+    Adds `ownerOf(uint256 id)` function to directly query token ownership, similar to ERC721.
+  </Card>
+  <Card title="Simplified Balances" icon="scale-balanced">
+    `balanceOf` returns either 0 or 1, never higher values.
+  </Card>
+  <Card title="ENS Integration" icon="link">
+    Extends `HCAContext` for Hierarchical Call Authorization in ENS v2.
+  </Card>
+</CardGroup>
+
+## Contract Details
+
+**Location:** `src/erc1155/ERC1155Singleton.sol`
+
+**Inherits:**
+- `HCAContext` - Hierarchical Call Authorization context
+- `ERC165` - Interface detection
+- `IERC1155Singleton` - Extended ERC1155 interface with `ownerOf`
+- `IERC1155Errors` - Standard ERC1155 error definitions
+- `IERC1155MetadataURI` - Metadata URI support
+
+## State Variables
+
+The contract maintains minimal storage for efficient ownership tracking:
+
+```solidity
+// Token ID to owner address mapping
+mapping(uint256 id => address account) private _owners;
+
+// Owner to operator approval mapping
+mapping(address account => mapping(address operator => bool)) private _operatorApprovals;
+```
+
+## Functions
+
+### supportsInterface
+
+```solidity
+function supportsInterface(bytes4 interfaceId) public view virtual returns (bool)
+```
+
+Checks if the contract implements a specific interface using ERC165 standard.
+
+<ParamField path="interfaceId" type="bytes4" required>
+  The interface identifier to check
+</ParamField>
+
+<ResponseField name="return" type="bool">
+  True if the interface is supported, false otherwise
+</ResponseField>
+
+**Supported Interfaces:**
+- `IERC1155` (`0xd9b67a26`)
+- `IERC1155Singleton` (`0x6352211e`)
+- `IERC1155MetadataURI` (`0x0e89341c`)
+- All interfaces supported by parent contracts
+
+```solidity Example
+// Check if contract supports ERC1155
+bool isERC1155 = contract.supportsInterface(type(IERC1155).interfaceId);
+
+// Check if contract supports ownerOf (singleton)
+bool isSingleton = contract.supportsInterface(type(IERC1155Singleton).interfaceId);
+```
+
+### ownerOf
+
+```solidity
+function ownerOf(uint256 id) public view virtual returns (address owner)
+```
+
+Returns the owner of a specific token ID. This is the key distinguishing feature from standard ERC1155.
+
+<ParamField path="id" type="uint256" required>
+  The token ID to query ownership for
+</ParamField>
+
+<ResponseField name="owner" type="address">
+  The address that owns the token, or `address(0)` if the token doesn't exist
+</ResponseField>
+
+```solidity Example
+// Get the owner of token ID 123
+address owner = registry.ownerOf(123);
+
+if (owner == address(0)) {
+    // Token doesn't exist or has been burned
+} else {
+    // Token is owned by `owner`
+}
+```
+
+### balanceOf
+
+```solidity
+function balanceOf(address account, uint256 id) public view virtual returns (uint256)
+```
+
+Returns the balance of a token ID for an account. Always returns 0 or 1 due to the singleton constraint.
+
+<ParamField path="account" type="address" required>
+  The address to query the balance for
+</ParamField>
+
+<ParamField path="id" type="uint256" required>
+  The token ID to query
+</ParamField>
+
+<ResponseField name="return" type="uint256">
+  Returns `1` if the account owns the token, `0` otherwise
+</ResponseField>
+
+```solidity Example
+// Check if an address owns a specific token
+uint256 balance = registry.balanceOf(userAddress, tokenId);
+// balance is either 0 or 1
+
+if (balance > 0) {
+    // User owns the token
+}
+```
+
+### balanceOfBatch
+
+```solidity
+function balanceOfBatch(
+    address[] memory accounts,
+    uint256[] memory ids
+) public view virtual returns (uint256[] memory)
+```
+
+Batch version of `balanceOf`. Queries multiple account/token pairs in a single call.
+
+<ParamField path="accounts" type="address[]" required>
+  Array of addresses to query balances for
+</ParamField>
+
+<ParamField path="ids" type="uint256[]" required>
+  Array of token IDs to query (must be same length as accounts)
+</ParamField>
+
+<ResponseField name="return" type="uint256[]">
+  Array of balances (0 or 1) corresponding to each account/id pair
+</ResponseField>
+
+**Requirements:**
+- `accounts` and `ids` arrays must have the same length
+
+**Reverts:**
+- `ERC1155InvalidArrayLength(uint256 idsLength, uint256 valuesLength)` if array lengths don't match
+
+```solidity Example
+address[] memory owners = new address[](3);
+owners[0] = alice;
+owners[1] = bob;
+owners[2] = alice;
+
+uint256[] memory tokenIds = new uint256[](3);
+tokenIds[0] = 100;
+tokenIds[1] = 200;
+tokenIds[2] = 300;
+
+uint256[] memory balances = registry.balanceOfBatch(owners, tokenIds);
+// balances[0] = 1 if alice owns token 100, else 0
+// balances[1] = 1 if bob owns token 200, else 0
+// balances[2] = 1 if alice owns token 300, else 0
+```
+
+### setApprovalForAll
+
+```solidity
+function setApprovalForAll(address operator, bool approved) public virtual
+```
+
+Grants or revokes permission for an operator to manage all of the caller's tokens.
+
+<ParamField path="operator" type="address" required>
+  The address to grant or revoke operator status
+</ParamField>
+
+<ParamField path="approved" type="bool" required>
+  `true` to grant approval, `false` to revoke
+</ParamField>
+
+**Emits:**
+- `ApprovalForAll(address indexed account, address indexed operator, bool approved)`
+
+**Reverts:**
+- `ERC1155InvalidOperator(address(0))` if operator is the zero address
+
+```solidity Example
+// Grant operator approval
+registry.setApprovalForAll(operatorAddress, true);
+
+// Later, revoke approval
+registry.setApprovalForAll(operatorAddress, false);
+```
+
+### isApprovedForAll
+
+```solidity
+function isApprovedForAll(address account, address operator) public view virtual returns (bool)
+```
+
+Checks if an operator is approved to manage all tokens for a specific account.
+
+<ParamField path="account" type="address" required>
+  The token owner's address
+</ParamField>
+
+<ParamField path="operator" type="address" required>
+  The operator's address to check
+</ParamField>
+
+<ResponseField name="return" type="bool">
+  `true` if the operator is approved, `false` otherwise
+</ResponseField>
+
+```solidity Example
+bool isApproved = registry.isApprovedForAll(owner, operator);
+
+if (isApproved) {
+    // Operator can transfer owner's tokens
+}
+```
+
+### safeTransferFrom
+
+```solidity
+function safeTransferFrom(
+    address from,
+    address to,
+    uint256 id,
+    uint256 value,
+    bytes memory data
+) public virtual
+```
+
+Safely transfers a token from one address to another with acceptance check.
+
+<ParamField path="from" type="address" required>
+  The current owner of the token
+</ParamField>
+
+<ParamField path="to" type="address" required>
+  The recipient address
+</ParamField>
+
+<ParamField path="id" type="uint256" required>
+  The token ID to transfer
+</ParamField>
+
+<ParamField path="value" type="uint256" required>
+  The amount to transfer (must be 1 for singleton tokens)
+</ParamField>
+
+<ParamField path="data" type="bytes" required>
+  Additional data to pass to the receiver contract
+</ParamField>
+
+**Requirements:**
+- Caller must be the token owner or approved operator
+- `to` cannot be the zero address
+- `from` must own the token
+- `value` must be 1 (singleton constraint)
+- If `to` is a contract, it must implement `IERC1155Receiver.onERC1155Received`
+
+**Emits:**
+- `TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value)`
+
+**Reverts:**
+- `ERC1155MissingApprovalForAll(address operator, address owner)` if caller lacks approval
+- `ERC1155InvalidReceiver(address(0))` if recipient is zero address
+- `ERC1155InvalidSender(address(0))` if sender is zero address
+- `ERC1155InsufficientBalance(address sender, uint256 balance, uint256 needed, uint256 tokenId)` if value is not 1 or sender doesn't own the token
+
+```solidity Example
+// Transfer token 123 from alice to bob
+registry.safeTransferFrom(
+    alice,
+    bob,
+    123,      // token ID
+    1,        // value (must be 1)
+    ""        // no additional data
+);
+
+// Transfer with custom data for receiver contract
+registry.safeTransferFrom(
+    alice,
+    contractAddress,
+    456,
+    1,
+    abi.encode("custom", "data")
+);
+```
+
+### safeBatchTransferFrom
+
+```solidity
+function safeBatchTransferFrom(
+    address from,
+    address to,
+    uint256[] memory ids,
+    uint256[] memory values,
+    bytes memory data
+) public virtual
+```
+
+Batch version of `safeTransferFrom`. Transfers multiple tokens in a single transaction.
+
+<ParamField path="from" type="address" required>
+  The current owner of the tokens
+</ParamField>
+
+<ParamField path="to" type="address" required>
+  The recipient address
+</ParamField>
+
+<ParamField path="ids" type="uint256[]" required>
+  Array of token IDs to transfer
+</ParamField>
+
+<ParamField path="values" type="uint256[]" required>
+  Array of amounts to transfer (each must be 1)
+</ParamField>
+
+<ParamField path="data" type="bytes" required>
+  Additional data to pass to the receiver contract
+</ParamField>
+
+**Requirements:**
+- Same requirements as `safeTransferFrom`
+- `ids` and `values` arrays must have the same length
+- All values must be 1
+
+**Emits:**
+- `TransferBatch(address indexed operator, address indexed from, address indexed to, uint256[] ids, uint256[] values)`
+
+**Reverts:**
+- Same reverts as `safeTransferFrom`
+- `ERC1155InvalidArrayLength(uint256 idsLength, uint256 valuesLength)` if array lengths don't match
+
+```solidity Example
+uint256[] memory tokenIds = new uint256[](3);
+tokenIds[0] = 100;
+tokenIds[1] = 200;
+tokenIds[2] = 300;
+
+uint256[] memory amounts = new uint256[](3);
+amounts[0] = 1;
+amounts[1] = 1;
+amounts[2] = 1;
+
+// Batch transfer three tokens
+registry.safeBatchTransferFrom(
+    alice,
+    bob,
+    tokenIds,
+    amounts,
+    ""
+);
+```
+
+### uri
+
+```solidity
+function uri(uint256 id) public view virtual returns (string memory)
+```
+
+Returns the URI for token metadata. This function must be implemented by inheriting contracts.
+
+<ParamField path="id" type="uint256" required>
+  The token ID to get the URI for
+</ParamField>
+
+<ResponseField name="return" type="string">
+  The URI string for the token's metadata
+</ResponseField>
+
+```solidity Example
+// Implementation in inheriting contract
+function uri(uint256 id) public view override returns (string memory) {
+    return string(abi.encodePacked("https://metadata.ens.domains/", id));
+}
+```
+
+## Internal Functions
+
+The following internal functions are available for use by contracts inheriting from `ERC1155Singleton`:
+
+### _mint
+
+```solidity
+function _mint(address to, uint256 id, uint256 value, bytes memory data) internal
+```
+
+Creates a new token and assigns it to an address.
+
+<ParamField path="to" type="address" required>
+  The address to mint the token to
+</ParamField>
+
+<ParamField path="id" type="uint256" required>
+  The token ID to mint
+</ParamField>
+
+<ParamField path="value" type="uint256" required>
+  The amount to mint (must be 1)
+</ParamField>
+
+<ParamField path="data" type="bytes" required>
+  Additional data for receiver contract
+</ParamField>
+
+**Requirements:**
+- `to` cannot be the zero address
+- Token ID must not already exist (enforced by singleton constraint)
+- `value` must be 1
+- If `to` is a contract, it must implement `IERC1155Receiver.onERC1155Received`
+
+**Emits:**
+- `TransferSingle(address indexed operator, address(0), address indexed to, uint256 id, uint256 value)`
+
+```solidity Example
+// Mint token 123 to user
+_mint(userAddress, 123, 1, "");
+```
+
+### _mintBatch
+
+```solidity
+function _mintBatch(
+    address to,
+    uint256[] memory ids,
+    uint256[] memory values,
+    bytes memory data
+) internal
+```
+
+Batch version of `_mint`. Creates multiple tokens in a single transaction.
+
+<ParamField path="to" type="address" required>
+  The address to mint tokens to
+</ParamField>
+
+<ParamField path="ids" type="uint256[]" required>
+  Array of token IDs to mint
+</ParamField>
+
+<ParamField path="values" type="uint256[]" required>
+  Array of amounts to mint (each must be 1)
+</ParamField>
+
+<ParamField path="data" type="bytes" required>
+  Additional data for receiver contract
+</ParamField>
+
+**Requirements:**
+- Same as `_mint`
+- Arrays must have the same length
+
+**Emits:**
+- `TransferBatch(address indexed operator, address(0), address indexed to, uint256[] ids, uint256[] values)`
+
+```solidity Example
+uint256[] memory tokenIds = new uint256[](3);
+tokenIds[0] = 100;
+tokenIds[1] = 200;
+tokenIds[2] = 300;
+
+uint256[] memory amounts = new uint256[](3);
+amounts[0] = 1;
+amounts[1] = 1;
+amounts[2] = 1;
+
+_mintBatch(userAddress, tokenIds, amounts, "");
+```
+
+### _burn
+
+```solidity
+function _burn(address from, uint256 id, uint256 value) internal
+```
+
+Destroys a token, removing it from circulation.
+
+<ParamField path="from" type="address" required>
+  The current owner of the token
+</ParamField>
+
+<ParamField path="id" type="uint256" required>
+  The token ID to burn
+</ParamField>
+
+<ParamField path="value" type="uint256" required>
+  The amount to burn (must be 1)
+</ParamField>
+
+**Requirements:**
+- `from` cannot be the zero address
+- `from` must own the token
+- `value` must be 1
+
+**Emits:**
+- `TransferSingle(address indexed operator, address indexed from, address(0), uint256 id, uint256 value)`
+
+```solidity Example
+// Burn token 123 from user
+_burn(userAddress, 123, 1);
+```
+
+### _burnBatch
+
+```solidity
+function _burnBatch(address from, uint256[] memory ids, uint256[] memory values) internal
+```
+
+Batch version of `_burn`. Destroys multiple tokens in a single transaction.
+
+<ParamField path="from" type="address" required>
+  The current owner of the tokens
+</ParamField>
+
+<ParamField path="ids" type="uint256[]" required>
+  Array of token IDs to burn
+</ParamField>
+
+<ParamField path="values" type="uint256[]" required>
+  Array of amounts to burn (each must be 1)
+</ParamField>
+
+**Requirements:**
+- Same as `_burn`
+- Arrays must have the same length
+
+**Emits:**
+- `TransferBatch(address indexed operator, address indexed from, address(0), uint256[] ids, uint256[] values)`
+
+```solidity Example
+uint256[] memory tokenIds = new uint256[](3);
+tokenIds[0] = 100;
+tokenIds[1] = 200;
+tokenIds[2] = 300;
+
+uint256[] memory amounts = new uint256[](3);
+amounts[0] = 1;
+amounts[1] = 1;
+amounts[2] = 1;
+
+_burnBatch(userAddress, tokenIds, amounts);
+```
+
+### _update
+
+```solidity
+function _update(
+    address from,
+    address to,
+    uint256[] memory ids,
+    uint256[] memory values
+) internal virtual
+```
+
+Core internal function that handles token transfers, mints, and burns. Does not perform acceptance checks.
+
+<ParamField path="from" type="address" required>
+  The sender address (`address(0)` for minting)
+</ParamField>
+
+<ParamField path="to" type="address" required>
+  The recipient address (`address(0)` for burning)
+</ParamField>
+
+<ParamField path="ids" type="uint256[]" required>
+  Array of token IDs to update
+</ParamField>
+
+<ParamField path="values" type="uint256[]" required>
+  Array of amounts (each must be 1 for transfers, 0 is allowed for no-ops)
+</ParamField>
+
+**Logic:**
+- Validates array lengths match
+- For each token with value > 0:
+  - Verifies sender owns the token
+  - Enforces singleton constraint (value must be 1)
+  - Updates ownership mapping
+- Emits `TransferSingle` or `TransferBatch` event
+
+**Reverts:**
+- `ERC1155InvalidArrayLength(uint256 idsLength, uint256 valuesLength)` if array lengths don't match
+- `ERC1155InsufficientBalance(address sender, uint256 balance, uint256 needed, uint256 tokenId)` if value exceeds 1 or sender doesn't own the token
+
+<Note>
+This function does **not** perform the ERC1155 receiver acceptance check. Use `_updateWithAcceptanceCheck` instead when transferring to potentially unknown addresses.
+</Note>
+
+### _updateWithAcceptanceCheck
+
+```solidity
+function _updateWithAcceptanceCheck(
+    address from,
+    address to,
+    uint256[] memory ids,
+    uint256[] memory values,
+    bytes memory data
+) internal virtual
+```
+
+Version of `_update` that includes the ERC1155 receiver acceptance check for safe transfers.
+
+<ParamField path="from" type="address" required>
+  The sender address
+</ParamField>
+
+<ParamField path="to" type="address" required>
+  The recipient address
+</ParamField>
+
+<ParamField path="ids" type="uint256[]" required>
+  Array of token IDs
+</ParamField>
+
+<ParamField path="values" type="uint256[]" required>
+  Array of amounts
+</ParamField>
+
+<ParamField path="data" type="bytes" required>
+  Additional data for receiver contract
+</ParamField>
+
+**Logic:**
+1. Calls `_update` to perform the transfer
+2. If recipient is a contract, calls `onERC1155Received` or `onERC1155BatchReceived`
+3. Validates the receiver returns the correct magic value
+
+<Warning>
+Overriding this function is discouraged due to reentrancy risks. Override `_update` instead to customize transfer logic.
+</Warning>
+
+### _setApprovalForAll
+
+```solidity
+function _setApprovalForAll(address owner, address operator, bool approved) internal virtual
+```
+
+Internal function to set operator approval status.
+
+<ParamField path="owner" type="address" required>
+  The token owner granting or revoking approval
+</ParamField>
+
+<ParamField path="operator" type="address" required>
+  The operator receiving approval status
+</ParamField>
+
+<ParamField path="approved" type="bool" required>
+  Whether to grant or revoke approval
+</ParamField>
+
+**Emits:**
+- `ApprovalForAll(address indexed owner, address indexed operator, bool approved)`
+
+**Reverts:**
+- `ERC1155InvalidOperator(address(0))` if operator is zero address
+
+## Events
+
+### TransferSingle
+
+```solidity
+event TransferSingle(
+    address indexed operator,
+    address indexed from,
+    address indexed to,
+    uint256 id,
+    uint256 value
+)
+```
+
+Emitted when a single token is transferred.
+
+<ResponseField name="operator" type="address" indexed>
+  The address that initiated the transfer
+</ResponseField>
+
+<ResponseField name="from" type="address" indexed>
+  The sender address (`address(0)` for minting)
+</ResponseField>
+
+<ResponseField name="to" type="address" indexed>
+  The recipient address (`address(0)` for burning)
+</ResponseField>
+
+<ResponseField name="id" type="uint256">
+  The token ID that was transferred
+</ResponseField>
+
+<ResponseField name="value" type="uint256">
+  The amount transferred (always 1 for singleton tokens)
+</ResponseField>
+
+### TransferBatch
+
+```solidity
+event TransferBatch(
+    address indexed operator,
+    address indexed from,
+    address indexed to,
+    uint256[] ids,
+    uint256[] values
+)
+```
+
+Emitted when multiple tokens are transferred in a batch.
+
+<ResponseField name="operator" type="address" indexed>
+  The address that initiated the transfer
+</ResponseField>
+
+<ResponseField name="from" type="address" indexed>
+  The sender address (`address(0)` for minting)
+</ResponseField>
+
+<ResponseField name="to" type="address" indexed>
+  The recipient address (`address(0)` for burning)
+</ResponseField>
+
+<ResponseField name="ids" type="uint256[]">
+  Array of token IDs that were transferred
+</ResponseField>
+
+<ResponseField name="values" type="uint256[]">
+  Array of amounts transferred (all values are 1 for singleton tokens)
+</ResponseField>
+
+### ApprovalForAll
+
+```solidity
+event ApprovalForAll(
+    address indexed account,
+    address indexed operator,
+    bool approved
+)
+```
+
+Emitted when an operator is granted or revoked approval to manage all tokens for an account.
+
+<ResponseField name="account" type="address" indexed>
+  The token owner granting or revoking approval
+</ResponseField>
+
+<ResponseField name="operator" type="address" indexed>
+  The operator receiving approval status
+</ResponseField>
+
+<ResponseField name="approved" type="bool">
+  `true` if approval was granted, `false` if revoked
+</ResponseField>
+
+### Approval
+
+```solidity
+event Approval(
+    address indexed owner,
+    address indexed approved,
+    uint256 indexed tokenId
+)
+```
+
+Additional event defined in `ERC1155Singleton` (though not actively used in current implementation).
+
+<ResponseField name="owner" type="address" indexed>
+  The token owner
+</ResponseField>
+
+<ResponseField name="approved" type="address" indexed>
+  The approved address
+</ResponseField>
+
+<ResponseField name="tokenId" type="uint256" indexed>
+  The token ID
+</ResponseField>
+
+## Error Reference
+
+The contract uses standard ERC1155 errors from OpenZeppelin:
+
+### ERC1155InvalidOperator
+
+```solidity
+error ERC1155InvalidOperator(address operator)
+```
+
+Thrown when an invalid operator address is used (typically `address(0)`).
+
+### ERC1155MissingApprovalForAll
+
+```solidity
+error ERC1155MissingApprovalForAll(address operator, address owner)
+```
+
+Thrown when an operator attempts a transfer without approval.
+
+### ERC1155InsufficientBalance
+
+```solidity
+error ERC1155InsufficientBalance(address sender, uint256 balance, uint256 needed, uint256 tokenId)
+```
+
+Thrown when:
+- Attempting to transfer a value greater than 1 (singleton constraint)
+- Sender doesn't own the token being transferred
+
+### ERC1155InvalidReceiver
+
+```solidity
+error ERC1155InvalidReceiver(address receiver)
+```
+
+Thrown when the recipient address is `address(0)`.
+
+### ERC1155InvalidSender
+
+```solidity
+error ERC1155InvalidSender(address sender)
+```
+
+Thrown when the sender address is `address(0)`.
+
+### ERC1155InvalidArrayLength
+
+```solidity
+error ERC1155InvalidArrayLength(uint256 idsLength, uint256 valuesLength)
+```
+
+Thrown when array parameters have mismatched lengths.
+
+## Interface
+
+### IERC1155Singleton
+
+The contract implements the `IERC1155Singleton` interface which extends standard ERC1155:
+
+```solidity
+interface IERC1155Singleton is IERC1155 {
+    function ownerOf(uint256 id) external view returns (address owner);
+}
+```
+
+**Interface ID:** `0x6352211e`
+
+This interface adds the `ownerOf` function to standard ERC1155, enabling direct ownership queries similar to ERC721.
+
+## Usage Examples
+
+### Basic Token Operations
+
+```solidity
+// Deploy a contract inheriting from ERC1155Singleton
+contract MyNFTRegistry is ERC1155Singleton {
+    constructor() {}
+    
+    function uri(uint256 id) public view override returns (string memory) {
+        return string(abi.encodePacked("https://api.example.com/token/", id));
+    }
+    
+    function mint(address to, uint256 tokenId) external {
+        _mint(to, tokenId, 1, "");
+    }
+}
+
+// Usage
+MyNFTRegistry registry = new MyNFTRegistry();
+
+// Mint a token
+registry.mint(alice, 1);
+
+// Check ownership
+address owner = registry.ownerOf(1); // returns alice
+uint256 balance = registry.balanceOf(alice, 1); // returns 1
+
+// Transfer
+registry.safeTransferFrom(alice, bob, 1, 1, "");
+
+// Check new ownership
+owner = registry.ownerOf(1); // now returns bob
+balance = registry.balanceOf(alice, 1); // returns 0
+balance = registry.balanceOf(bob, 1); // returns 1
+```
+
+### Operator Approval Pattern
+
+```solidity
+// Alice approves an operator
+registry.setApprovalForAll(operator, true);
+
+// Operator can now transfer Alice's tokens
+registry.safeTransferFrom(alice, bob, tokenId, 1, "");
+
+// Check approval status
+bool isApproved = registry.isApprovedForAll(alice, operator); // true
+
+// Revoke approval
+registry.setApprovalForAll(operator, false);
+```
+
+### Batch Operations
+
+```solidity
+// Prepare batch data
+uint256[] memory tokenIds = new uint256[](5);
+uint256[] memory amounts = new uint256[](5);
+
+for (uint256 i = 0; i < 5; i++) {
+    tokenIds[i] = i + 1;
+    amounts[i] = 1; // All amounts must be 1
+}
+
+// Mint batch
+_mintBatch(alice, tokenIds, amounts, "");
+
+// Transfer batch
+registry.safeBatchTransferFrom(alice, bob, tokenIds, amounts, "");
+
+// Query batch balances
+address[] memory accounts = new address[](5);
+for (uint256 i = 0; i < 5; i++) {
+    accounts[i] = bob;
+}
+
+uint256[] memory balances = registry.balanceOfBatch(accounts, tokenIds);
+// All balances should be 1 since bob now owns all tokens
+```
+
+## Security Considerations
+
+<AccordionGroup>
+  <Accordion title="Singleton Enforcement">
+    The contract enforces that only one token exists per ID by checking in `_update` that values are either 0 or 1. Attempting to transfer value > 1 will revert with `ERC1155InsufficientBalance`.
+  </Accordion>
+
+  <Accordion title="Reentrancy Protection">
+    The contract follows the check-effects-interaction pattern. State changes occur in `_update` before external calls in `_updateWithAcceptanceCheck`. Contracts inheriting should maintain this pattern.
+  </Accordion>
+
+  <Accordion title="Zero Address Checks">
+    The contract validates against zero addresses for operators, senders, and receivers to prevent accidental burns or invalid operations.
+  </Accordion>
+
+  <Accordion title="Approval Security">
+    Operator approvals grant full control over all tokens. Users should only approve trusted operators and revoke approvals when no longer needed.
+  </Accordion>
+</AccordionGroup>
+
+## Integration with ENS v2
+
+In ENS v2, `ERC1155Singleton` serves as the base for registry contracts that represent name ownership:
+
+- **Token ID** represents the canonical ID of an ENS name
+- **Owner** is the address with control over the name
+- **Singleton constraint** ensures each name has exactly one owner
+- **HCAContext integration** enables hierarchical permission checks
+
+This design allows ENS names to be represented as NFTs while maintaining the multi-token benefits of ERC1155 (like batch operations) and enabling custom ownership models through the canonical ID system.
+
+## See Also
+
+<CardGroup cols={2}>
+  <Card title="Registry Contracts" icon="database" href="/api/registry/permissioned-registry">
+    See how registries use ERC1155Singleton
+  </Card>
+  <Card title="OpenZeppelin ERC1155" icon="book" href="https://docs.openzeppelin.com/contracts/5.x/erc1155">
+    Standard ERC1155 documentation
+  </Card>
+  <Card title="ERC1155 Standard" icon="file-lines" href="https://eips.ethereum.org/EIPS/eip-1155">
+    Original EIP-1155 specification
+  </Card>
+</CardGroup>

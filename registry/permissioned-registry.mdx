@@ -1,0 +1,714 @@
+---
+title: "PermissionedRegistry"
+description: "Core registry contract with role-based access control and tokenized name management"
+---
+
+## Overview
+
+`PermissionedRegistry` is the foundational contract for ENS v2's registry system. It combines ERC-1155 token ownership with fine-grained role-based access control to manage domain names as tradeable, permissioned assets.
+
+## Contract Details
+
+**Location**: `contracts/src/registry/PermissionedRegistry.sol`
+
+**Inherits**:
+- `IRegistry` - Core registry interface
+- `ERC1155Singleton` - Single-token-per-ID implementation
+- `EnhancedAccessControl` - Role-based permission system
+- `IPermissionedRegistry` - Extended registry interface
+- `MetadataMixin` - Token URI metadata support
+
+**Interface Selector**: `0xafff3a63`
+
+## Architecture
+
+### State Diagram
+
+The registry implements a three-state lifecycle for all names:
+
+```
+                     register()
+                  +ROLE_REGISTRAR
+      +------------------->----------------------+
+      |                                          |
+      |                renew()                   |    renew()
+      |              +ROLE_RENEW                 |  +ROLE_RENEW
+      |               +------+                   |   +------+
+      |               |      |                   |   |      |
+      ʌ               ʌ      v                   v   v      |
+  AVAILABLE --------> RESERVED -------------> REGISTERED >--+
+      ʌ    register()    v       register()        v
+      |    w/owner=0     | +ROLE_REGISTER_RESERVED |
+      | +ROLE_REGISTRAR  |                         |
+      |                  |                         |
+      +--------<---------+------------<------------+
+                    unregister()
+                 +ROLE_UNREGISTER
+```
+
+## Storage Structure
+
+### Entry Struct
+
+Each name is stored as a packed `Entry` struct:
+
+```solidity
+struct Entry {
+    uint32 eacVersionId;      // Enhanced Access Control version
+    uint32 tokenVersionId;    // ERC-1155 token version
+    IRegistry subregistry;    // Optional child registry
+    uint64 expiry;            // Unix timestamp expiration
+    address resolver;         // Resolver contract address
+}
+```
+
+<Info>
+  All fields fit into a single 256-bit storage slot, minimizing gas costs.
+</Info>
+
+### Internal Storage
+
+```solidity
+mapping(uint256 storageId => Entry entry) internal _entries;
+IRegistry internal _parent;
+string internal _childLabel;
+```
+
+The `storageId` is the label ID with version bits cleared (version 0).
+
+## Constructor
+
+```solidity
+constructor(
+    IHCAFactoryBasic hcaFactory,
+    IRegistryMetadata metadata,
+    address ownerAddress,
+    uint256 ownerRoles
+)
+```
+
+**Parameters**:
+- `hcaFactory` - Factory for hierarchical contract addresses
+- `metadata` - Metadata provider for token URIs
+- `ownerAddress` - Initial owner to receive roles (can be `address(0)`)
+- `ownerRoles` - Initial role bitmap to grant owner
+
+**Example**:
+
+```solidity
+PermissionedRegistry registry = new PermissionedRegistry(
+    hcaFactory,
+    metadataProvider,
+    msg.sender,
+    RegistryRolesLib.ROLE_REGISTRAR |
+    RegistryRolesLib.ROLE_REGISTRAR_ADMIN
+);
+```
+
+## Core Functions
+
+### register
+
+```solidity
+function register(
+    string memory label,
+    address owner,
+    IRegistry registry,
+    address resolver,
+    uint256 roleBitmap,
+    uint64 expiry
+) public virtual returns (uint256 tokenId)
+```
+
+Registers or reserves a new name, or completes a reservation.
+
+**Parameters**:
+- `label` - The DNS label (1-255 bytes)
+- `owner` - Recipient address (`address(0)` for reservation)
+- `registry` - Optional subregistry contract
+- `resolver` - Optional resolver address
+- `roleBitmap` - Roles to grant to owner (must be 0 if `owner` is 0)
+- `expiry` - Expiration timestamp (0 to reuse existing for reserved names)
+
+**Returns**:
+- `tokenId` - The minted token ID (or next token ID for reservations)
+
+**State Transitions**:
+
+<Tabs>
+  <Tab title="AVAILABLE → REGISTERED">
+    **Requires**: `ROLE_REGISTRAR` on `ROOT_RESOURCE`
+    
+    ```solidity
+    uint256 tokenId = registry.register(
+        "newname",
+        msg.sender,
+        IRegistry(address(0)),
+        address(resolver),
+        RegistryRolesLib.ROLE_SET_RESOLVER,
+        uint64(block.timestamp + 365 days)
+    );
+    // Emits: NameRegistered
+    // Token minted to msg.sender
+    ```
+  </Tab>
+  
+  <Tab title="AVAILABLE → RESERVED">
+    **Requires**: `ROLE_REGISTRAR` on `ROOT_RESOURCE`
+    
+    ```solidity
+    uint256 tokenId = registry.register(
+        "reserved",
+        address(0),    // Creates reservation
+        IRegistry(address(0)),
+        address(0),
+        0,             // No roles for reservations
+        uint64(block.timestamp + 7 days)
+    );
+    // Emits: NameReserved
+    // No token minted
+    ```
+  </Tab>
+  
+  <Tab title="RESERVED → REGISTERED">
+    **Requires**: `ROLE_REGISTER_RESERVED` on `ROOT_RESOURCE`
+    
+    ```solidity
+    // Complete a reservation
+    registry.register(
+        "reserved",
+        winner,
+        IRegistry(address(0)),
+        address(resolver),
+        desiredRoles,
+        0  // Reuses reservation expiry
+    );
+    // Emits: NameRegistered
+    // Token minted to winner
+    ```
+  </Tab>
+</Tabs>
+
+**Events**:
+
+```solidity
+// For registrations
+event NameRegistered(
+    uint256 indexed tokenId,
+    bytes32 indexed labelHash,
+    string label,
+    address owner,
+    uint64 expiry,
+    address indexed sender
+);
+
+// For reservations
+event NameReserved(
+    uint256 indexed tokenId,
+    bytes32 indexed labelHash,
+    string label,
+    uint64 expiry,
+    address indexed sender
+);
+```
+
+**Errors**:
+
+```solidity
+error NameAlreadyRegistered(string label);
+error NameAlreadyReserved(string label);
+error CannotSetPastExpiration(uint64 expiry);
+error EACCannotGrantRoles(uint256 resource, uint256 roleBitmap, address sender);
+```
+
+### unregister
+
+```solidity
+function unregister(uint256 anyId) public virtual
+```
+
+Removes a registered or reserved name, making it available again.
+
+**Requires**: `ROLE_UNREGISTER` on the name's resource
+
+**Parameters**:
+- `anyId` - Label ID, token ID, or resource ID
+
+**Behavior**:
+- Burns the token if one exists
+- Increments both version IDs
+- Sets expiry to current timestamp
+- Does not clear subregistry or resolver
+
+**Example**:
+
+```solidity
+// Must have ROLE_UNREGISTER
+registry.unregister(tokenId);
+// Name becomes AVAILABLE
+// Can be re-registered immediately
+```
+
+**Events**:
+
+```solidity
+event NameUnregistered(uint256 indexed tokenId, address indexed sender);
+```
+
+### renew
+
+```solidity
+function renew(uint256 anyId, uint64 newExpiry) public override
+```
+
+Extends the expiration of a registered or reserved name.
+
+**Requires**: `ROLE_RENEW` on the name's resource
+
+**Parameters**:
+- `anyId` - Label ID, token ID, or resource ID
+- `newExpiry` - New expiration timestamp (must be greater than current)
+
+**Example**:
+
+```solidity
+// Extend by one year
+uint64 currentExpiry = registry.getExpiry(tokenId);
+registry.renew(tokenId, currentExpiry + 365 days);
+```
+
+**Events**:
+
+```solidity
+event ExpiryUpdated(
+    uint256 indexed tokenId,
+    uint64 newExpiry,
+    address indexed sender
+);
+```
+
+**Errors**:
+
+```solidity
+error CannotReduceExpiration(uint64 oldExpiration, uint64 newExpiration);
+error NameExpired(uint256 tokenId);
+```
+
+### setSubregistry
+
+```solidity
+function setSubregistry(uint256 anyId, IRegistry registry) public virtual
+```
+
+Sets the subregistry for a registered name.
+
+**Requires**: `ROLE_SET_SUBREGISTRY` on the name's resource
+
+**Parameters**:
+- `anyId` - Label ID, token ID, or resource ID
+- `registry` - New subregistry contract (or `address(0)` to clear)
+
+**Example**:
+
+```solidity
+// Deploy subregistry for "dao"
+IRegistry daoRegistry = deployUserRegistry(...);
+
+// Attach it to the name
+registry.setSubregistry(daoTokenId, daoRegistry);
+
+// Now dao.eth can manage its subdomains
+```
+
+**Events**:
+
+```solidity
+event SubregistryUpdated(
+    uint256 indexed tokenId,
+    IRegistry subregistry,
+    address indexed sender
+);
+```
+
+### setResolver
+
+```solidity
+function setResolver(uint256 anyId, address resolver) public virtual
+```
+
+Sets the resolver for a registered name.
+
+**Requires**: `ROLE_SET_RESOLVER` on the name's resource
+
+**Parameters**:
+- `anyId` - Label ID, token ID, or resource ID
+- `resolver` - New resolver address
+
+**Example**:
+
+```solidity
+registry.setResolver(tokenId, address(newResolver));
+```
+
+**Events**:
+
+```solidity
+event ResolverUpdated(
+    uint256 indexed tokenId,
+    address resolver,
+    address indexed sender
+);
+```
+
+### setParent
+
+```solidity
+function setParent(
+    IRegistry parent,
+    string memory label
+) public virtual
+```
+
+Sets the canonical parent registry and label.
+
+**Requires**: `ROLE_SET_PARENT` on `ROOT_RESOURCE`
+
+**Parameters**:
+- `parent` - Parent registry contract
+- `label` - This registry's label in the parent
+
+**Example**:
+
+```solidity
+// Set parent reference for dao.eth registry
+registry.setParent(ethRegistry, "dao");
+```
+
+**Events**:
+
+```solidity
+event ParentUpdated(
+    IRegistry indexed parent,
+    string label,
+    address indexed sender
+);
+```
+
+## Access Control Integration
+
+### Role Management
+
+PermissionedRegistry overloads Enhanced Access Control methods to work with `anyId`:
+
+```solidity
+// Grant roles using any identifier type
+registry.grantRoles(
+    anyId,  // Label ID, token ID, or resource ID
+    RegistryRolesLib.ROLE_SET_RESOLVER,
+    delegate
+);
+
+// Revoke roles
+registry.revokeRoles(
+    anyId,
+    RegistryRolesLib.ROLE_SET_RESOLVER,
+    delegate
+);
+
+// Check roles
+bool hasRole = registry.hasRoles(
+    anyId,
+    RegistryRolesLib.ROLE_SET_RESOLVER,
+    account
+);
+
+// Get all roles for an account
+uint256 roles = registry.roles(anyId, account);
+```
+
+### Admin Role Restrictions
+
+The registry restricts admin role management to prevent privilege escalation:
+
+```solidity
+function _getSettableRoles(
+    uint256 resource,
+    address account
+) internal view virtual override returns (uint256) {
+    uint256 allRoles = super.roles(resource, account) |
+                       super.roles(ROOT_RESOURCE, account);
+    uint256 adminRoleBitmap = allRoles & EACBaseRolesLib.ADMIN_ROLES;
+    return adminRoleBitmap >> 128;  // Only non-admin roles
+}
+```
+
+<Warning>
+  Admin roles can only be granted during initial registration, not via `grantRoles()`. This prevents unauthorized privilege escalation.
+</Warning>
+
+## View Functions
+
+### getSubregistry
+
+```solidity
+function getSubregistry(string calldata label)
+    public view virtual returns (IRegistry)
+```
+
+Returns the subregistry for a label, or `address(0)` if expired or unregistered.
+
+### getResolver
+
+```solidity
+function getResolver(string calldata label)
+    public view virtual returns (address)
+```
+
+Returns the resolver for a label, or `address(0)` if expired or unregistered.
+
+### getParent
+
+```solidity
+function getParent()
+    public view virtual returns (IRegistry parent, string memory label)
+```
+
+Returns the parent registry and this registry's label in the parent.
+
+### getExpiry
+
+```solidity
+function getExpiry(uint256 anyId) public view returns (uint64)
+```
+
+Returns the expiration timestamp for a name.
+
+### getResource
+
+```solidity
+function getResource(uint256 anyId) public view returns (uint256)
+```
+
+Converts any identifier to the current resource ID for access control.
+
+### getTokenId
+
+```solidity
+function getTokenId(uint256 anyId) public view returns (uint256)
+```
+
+Converts any identifier to the current token ID.
+
+### getStatus
+
+```solidity
+function getStatus(uint256 anyId) public view returns (Status)
+```
+
+Returns the current status: `AVAILABLE`, `RESERVED`, or `REGISTERED`.
+
+### getState
+
+```solidity
+function getState(uint256 anyId) public view returns (State memory state)
+```
+
+Returns complete state information:
+
+```solidity
+struct State {
+    Status status;
+    uint64 expiry;
+    address latestOwner;
+    uint256 tokenId;
+    uint256 resource;
+}
+```
+
+**Example**:
+
+```solidity
+State memory state = registry.getState(labelId);
+
+if (state.status == Status.REGISTERED) {
+    console.log("Owner:", state.latestOwner);
+    console.log("Expires:", state.expiry);
+    console.log("Token ID:", state.tokenId);
+}
+```
+
+### latestOwnerOf
+
+```solidity
+function latestOwnerOf(uint256 tokenId) public view returns (address)
+```
+
+Returns the owner of a token ID, even if expired. Does not check expiry.
+
+### ownerOf
+
+```solidity
+function ownerOf(uint256 tokenId) public view returns (address)
+```
+
+Returns the owner only if the token is valid (current version and not expired).
+
+## Token Transfer Controls
+
+The registry overrides `_update` to enforce transfer permissions:
+
+```solidity
+function _update(
+    address from,
+    address to,
+    uint256[] memory tokenIds,
+    uint256[] memory values
+) internal virtual override {
+    bool externalTransfer = to != address(0) && from != address(0);
+    if (externalTransfer) {
+        // Check ROLE_CAN_TRANSFER_ADMIN for each token
+        for (uint256 i; i < tokenIds.length; ++i) {
+            if (!hasRoles(tokenIds[i], RegistryRolesLib.ROLE_CAN_TRANSFER_ADMIN, from)) {
+                revert TransferDisallowed(tokenIds[i], from);
+            }
+        }
+    }
+    super._update(from, to, tokenIds, values);
+    if (externalTransfer) {
+        // Transfer all roles to new owner
+        for (uint256 i; i < tokenIds.length; ++i) {
+            _transferRoles(getResource(tokenIds[i]), from, to, false);
+        }
+    }
+}
+```
+
+<Info>
+  When a token is transferred, all roles associated with that resource are automatically transferred to the new owner.
+</Info>
+
+## Token Regeneration
+
+When roles are granted or revoked, the token is regenerated:
+
+```solidity
+function _regenerateToken(uint256 anyId) internal {
+    Entry storage entry = _entry(anyId);
+    if (!_isExpired(entry.expiry)) {
+        uint256 tokenId = _constructTokenId(anyId, entry);
+        address owner = super.ownerOf(tokenId);
+        if (owner != address(0)) {
+            _burn(owner, tokenId, 1);
+            ++entry.tokenVersionId;
+            uint256 newTokenId = _constructTokenId(tokenId, entry);
+            _mint(owner, newTokenId, 1, "");
+            emit TokenRegenerated(tokenId, newTokenId);
+        }
+    }
+}
+```
+
+This ensures:
+- ERC-1155 compliance (immutable token IDs)
+- Unique token IDs for different permission sets
+- No balance can exceed 1
+
+## Interface Support
+
+```solidity
+function supportsInterface(bytes4 interfaceId)
+    public view virtual override returns (bool)
+{
+    return
+        interfaceId == type(IPermissionedRegistry).interfaceId ||
+        interfaceId == type(IStandardRegistry).interfaceId ||
+        interfaceId == type(IRegistry).interfaceId ||
+        super.supportsInterface(interfaceId);
+}
+```
+
+## Usage Patterns
+
+### Creating a Registry
+
+```solidity
+// Deploy with initial admin
+PermissionedRegistry registry = new PermissionedRegistry(
+    hcaFactory,
+    metadataProvider,
+    admin,
+    RegistryRolesLib.ROLE_REGISTRAR |
+    RegistryRolesLib.ROLE_REGISTRAR_ADMIN |
+    RegistryRolesLib.ROLE_SET_PARENT |
+    RegistryRolesLib.ROLE_SET_PARENT_ADMIN
+);
+
+// Set parent reference
+registry.setParent(parentRegistry, "myregistry");
+```
+
+### Delegating Registration Rights
+
+```solidity
+// Grant registrar role to controller
+registry.grantRoles(
+    ROOT_RESOURCE,
+    RegistryRolesLib.ROLE_REGISTRAR,
+    controller
+);
+
+// Controller can now register names
+```
+
+### Managing Name Permissions
+
+```solidity
+// Register with specific permissions
+uint256 tokenId = registry.register(
+    "subdao",
+    daoContract,
+    IRegistry(address(0)),
+    address(resolver),
+    RegistryRolesLib.ROLE_SET_RESOLVER |
+    RegistryRolesLib.ROLE_RENEW,
+    uint64(block.timestamp + 365 days)
+);
+
+// Grant additional permissions later
+registry.grantRoles(
+    tokenId,
+    RegistryRolesLib.ROLE_SET_SUBREGISTRY,
+    daoContract
+);
+```
+
+## Security Considerations
+
+<Warning>
+  **Admin Roles**: Admin roles can only be granted during registration. This prevents privilege escalation attacks.
+</Warning>
+
+<Warning>
+  **Transfer Locks**: Names without `ROLE_CAN_TRANSFER_ADMIN` cannot be transferred, creating non-transferable names.
+</Warning>
+
+<Warning>
+  **Expiry Checks**: Always verify expiry before trusting returned data. Expired names return `address(0)` for most queries.
+</Warning>
+
+## Related Contracts
+
+<CardGroup cols={2}>
+  <Card title="UserRegistry" icon="user" href="/registry/user-registry">
+    Upgradeable extension of PermissionedRegistry
+  </Card>
+  <Card title="WrapperRegistry" icon="box" href="/registry/wrapper-registry">
+    Migration-enabled registry for v1 wrapped names
+  </Card>
+  <Card title="Registry Roles" icon="key" href="/access-control/registry-roles">
+    Complete role definitions and permissions
+  </Card>
+  <Card title="Enhanced Access Control" icon="shield" href="/access-control/enhanced-access-control">
+    Underlying permission system
+  </Card>
+</CardGroup>
