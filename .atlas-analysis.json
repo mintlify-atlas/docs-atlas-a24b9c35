@@ -1,0 +1,166 @@
+{
+  "projectType": "infrastructure",
+  "projectName": "ENS v2 Contracts",
+  "projectDescription": "Next-generation Ethereum Name Service smart contracts with hierarchical registries and cross-chain functionality",
+  "theme": "aspen",
+  "primaryColor": "#5298FF",
+  "lightColor": "#7CB9FF",
+  "darkColor": "#3B7FDD",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Getting Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/architecture",
+              "concepts/hierarchical-registries",
+              "concepts/canonical-id-system",
+              "concepts/resolution-process"
+            ]
+          },
+          {
+            "group": "Access Control",
+            "pages": [
+              "access-control/overview",
+              "access-control/enhanced-access-control",
+              "access-control/registry-roles",
+              "access-control/permission-inheritance"
+            ]
+          },
+          {
+            "group": "Registry System",
+            "pages": [
+              "registry/overview",
+              "registry/permissioned-registry",
+              "registry/registry-datastore",
+              "registry/user-registry",
+              "registry/wrapper-registry"
+            ]
+          },
+          {
+            "group": "Registrar",
+            "pages": [
+              "registrar/eth-registrar",
+              "registrar/rent-price-oracle"
+            ]
+          },
+          {
+            "group": "Resolution",
+            "pages": [
+              "resolution/universal-resolver",
+              "resolution/permissioned-resolver",
+              "resolution/dns-resolvers"
+            ]
+          },
+          {
+            "group": "Migration",
+            "pages": [
+              "migration/overview",
+              "migration/locked-migration",
+              "migration/unlocked-migration"
+            ]
+          },
+          {
+            "group": "Development",
+            "pages": [
+              "development/setup",
+              "development/testing",
+              "development/devnet",
+              "development/deployment"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Core Interfaces",
+            "pages": [
+              "api/interfaces/iregistry",
+              "api/interfaces/ipermissioned-registry",
+              "api/interfaces/ienhanced-access-control"
+            ]
+          },
+          {
+            "group": "Registry Contracts",
+            "pages": [
+              "api/registry/permissioned-registry",
+              "api/registry/registry-datastore",
+              "api/registry/user-registry",
+              "api/registry/wrapper-registry"
+            ]
+          },
+          {
+            "group": "Registrar Contracts",
+            "pages": [
+              "api/registrar/eth-registrar",
+              "api/registrar/standard-rent-price-oracle"
+            ]
+          },
+          {
+            "group": "Resolver Contracts",
+            "pages": [
+              "api/resolver/universal-resolver-v2",
+              "api/resolver/permissioned-resolver",
+              "api/resolver/dns-txt-resolver"
+            ]
+          },
+          {
+            "group": "Access Control",
+            "pages": [
+              "api/access-control/enhanced-access-control",
+              "api/access-control/registry-roles-lib"
+            ]
+          },
+          {
+            "group": "Token Standard",
+            "pages": [
+              "api/erc1155/erc1155-singleton"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Hierarchical registry system with custom ownership models",
+    "Role-based access control with 32 resource-scoped roles",
+    "Canonical ID system for mutable token IDs",
+    "Universal resolver with wildcard and batch resolution",
+    "ENSv1 to ENSv2 migration framework",
+    "Gas-optimized ERC1155 singleton for subdomain NFTs",
+    "DNS integration with DNSSEC support",
+    "Cross-chain functionality and scalability"
+  ],
+  "publicApiSurface": [
+    "IRegistry.getSubregistry()",
+    "IRegistry.getResolver()",
+    "PermissionedRegistry.register()",
+    "PermissionedRegistry.renew()",
+    "PermissionedRegistry.setSubregistry()",
+    "PermissionedRegistry.setResolver()",
+    "EnhancedAccessControl.grantRoles()",
+    "EnhancedAccessControl.revokeRoles()",
+    "EnhancedAccessControl.hasRoles()",
+    "ETHRegistrar.commit()",
+    "ETHRegistrar.register()",
+    "ETHRegistrar.renew()",
+    "UniversalResolverV2.resolve()",
+    "UniversalResolverV2.resolveBatch()",
+    "RegistryDatastore.getEntry()",
+    "RegistryDatastore.setEntry()",
+    "ERC1155Singleton.ownerOf()",
+    "ERC1155Singleton.safeTransferFrom()"
+  ]
+}
